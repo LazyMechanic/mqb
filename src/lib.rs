@@ -172,50 +172,42 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// fn main() {
-    ///     let mqb = MessageQueueBroker::unbounded();
-    ///     let sub = mqb.subscribe(1);
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     assert!(mqb.try_send(&1, 1).is_ok());
-    ///     assert_eq!(sub.try_recv().unwrap(), 1);
-    /// }
+    /// assert!(mqb.try_send(&1, 1).is_ok());
+    /// assert_eq!(sub.try_recv().unwrap(), 1);
     /// ```
     ///
     /// ### No subscribers
     /// ```
     /// use mqb::{MessageQueueBroker, TrySendError};
     ///
-    /// fn main() {
-    ///     let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    /// let mqb = MessageQueueBroker::<i32, i32>::unbounded();
     ///
-    ///     assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Closed(1));
-    /// }
+    /// assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Closed(1));
     /// ```
     ///
     /// ### Broker closed
     /// ```
     /// use mqb::{MessageQueueBroker, TrySendError};
     ///
-    /// fn main() {
-    ///     let mqb = MessageQueueBroker::unbounded();
-    ///     let sub = mqb.subscribe(1);
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     mqb.close();
-    ///     assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Closed(1));
-    /// }
+    /// mqb.close();
+    /// assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Closed(1));
     /// ```
     ///
     /// ### Queue is full
     /// ```
     /// use mqb::{MessageQueueBroker, TrySendError};
     ///
-    /// fn main() {
-    ///     let mqb = MessageQueueBroker::bounded(1);
-    ///     let sub = mqb.subscribe(1);
+    /// let mqb = MessageQueueBroker::bounded(1);
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     assert!(mqb.try_send(&1, 1).is_ok());
-    ///     assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Full(1));
-    /// }
+    /// assert!(mqb.try_send(&1, 1).is_ok());
+    /// assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Full(1));
     /// ```
     pub fn try_send<Q>(&self, tag: &Q, msg: M) -> Result<(), TrySendError<M>>
     where
@@ -233,58 +225,54 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mqb = MessageQueueBroker::unbounded();
-    ///     let sub = mqb.subscribe(1);
+    /// # tokio_test::block_on(async move {
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     assert!(mqb.send(&1, 1).await.is_ok());
-    ///     assert_eq!(sub.recv().await.unwrap(), 1);
-    /// }
+    /// assert!(mqb.send(&1, 1).await.is_ok());
+    /// assert_eq!(sub.recv().await.unwrap(), 1);
+    /// # })
     /// ```
     ///
     /// ### No subscribers
     /// ```
     /// use mqb::{MessageQueueBroker, SendError};
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    /// # tokio_test::block_on(async move {
+    /// let mqb = MessageQueueBroker::<i32, i32>::unbounded();
     ///
-    ///     assert_eq!(mqb.send(&1, 1).await.unwrap_err(), SendError(1));
-    /// }
+    /// assert_eq!(mqb.send(&1, 1).await.unwrap_err(), SendError(1));
+    /// # });
     /// ```
     ///
     /// ### Broker closed
     /// ```
     /// use mqb::{MessageQueueBroker, SendError};
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mqb = MessageQueueBroker::unbounded();
-    ///     let sub = mqb.subscribe(1);
+    /// # tokio_test::block_on(async move {
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     mqb.close();
-    ///     assert_eq!(mqb.send(&1, 1).await.unwrap_err(), SendError(1));
-    /// }
+    /// mqb.close();
+    /// assert_eq!(mqb.send(&1, 1).await.unwrap_err(), SendError(1));
+    /// # });
     /// ```
     ///
     /// ### Queue is full
     /// ```
     /// use mqb::{MessageQueueBroker, TrySendError};
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mqb = MessageQueueBroker::bounded(1);
-    ///     let sub = mqb.subscribe(1);
+    /// # tokio_test::block_on(async move {
+    /// let mqb = MessageQueueBroker::bounded(1);
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     assert!(mqb.send(&1, 1).await.is_ok());
-    ///     # async {
-    ///     # let _ =
-    ///     // Wait endlessly...
-    ///     mqb.send(&1, 2).await;
-    ///     # };
-    /// }
+    /// assert!(mqb.send(&1, 1).await.is_ok());
+    /// # async {
+    /// # let _ =
+    /// // Wait endlessly...
+    /// mqb.send(&1, 2).await;
+    /// # };
+    /// # });
     /// ```
     pub async fn send<Q>(&self, tag: &Q, msg: M) -> Result<(), SendError<M>>
     where
@@ -619,16 +607,15 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mqb = MessageQueueBroker::unbounded();
-    ///     let sub1 = mqb.subscribe(1);
-    ///     let sub2 = mqb.subscribe(2);
+    /// # tokio_test::block_on(async move {
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub1 = mqb.subscribe(1);
+    /// let sub2 = mqb.subscribe(2);
     ///
-    ///     mqb.send(&2, 1).await.unwrap();
-    ///     assert_eq!(sub1.len(), 0);
-    ///     assert_eq!(sub2.len(), mqb.len());
-    /// }
+    /// mqb.send(&2, 1).await.unwrap();
+    /// assert_eq!(sub1.len(), 0);
+    /// assert_eq!(sub2.len(), mqb.len());
+    /// # });
     /// ```
     pub fn len(&self) -> usize {
         self.bucket.queue.len()
@@ -640,16 +627,15 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mqb = MessageQueueBroker::unbounded();
-    ///     let sub1 = mqb.subscribe(1);
-    ///     let sub2 = mqb.subscribe(2);
+    /// # tokio_test::block_on(async move {
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub1 = mqb.subscribe(1);
+    /// let sub2 = mqb.subscribe(2);
     ///
-    ///     mqb.send(&2, 1).await.unwrap();
-    ///     assert!(sub1.is_empty());
-    ///     assert_eq!(sub2.len(), mqb.len());
-    /// }
+    /// mqb.send(&2, 1).await.unwrap();
+    /// assert!(sub1.is_empty());
+    /// assert_eq!(sub2.len(), mqb.len());
+    /// # });
     /// ```
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -672,38 +658,32 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// fn main() {
-    ///     let mqb = MessageQueueBroker::unbounded();
-    ///     let sub = mqb.subscribe(1);
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     assert!(mqb.try_send(&1, 1).is_ok());
-    ///     assert_eq!(sub.try_recv().unwrap(), 1);
-    /// }
+    /// assert!(mqb.try_send(&1, 1).is_ok());
+    /// assert_eq!(sub.try_recv().unwrap(), 1);
     /// ```
     ///
     /// ### Broker closed
     /// ```
     /// use mqb::{MessageQueueBroker, TryRecvError};
     ///
-    /// fn main() {
-    ///     let mqb = MessageQueueBroker::<i32, i32>::unbounded();
-    ///     let sub = mqb.subscribe(1);
+    /// let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     mqb.close();
-    ///     assert_eq!(sub.try_recv().unwrap_err(), TryRecvError::Closed);
-    /// }
+    /// mqb.close();
+    /// assert_eq!(sub.try_recv().unwrap_err(), TryRecvError::Closed);
     /// ```
     ///
     /// ### Queue is empty
     /// ```
     /// use mqb::{MessageQueueBroker, TryRecvError};
     ///
-    /// fn main() {
-    ///     let mqb = MessageQueueBroker::<i32, i32>::unbounded();
-    ///     let sub = mqb.subscribe(1);
+    /// let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     assert_eq!(sub.try_recv().unwrap_err(), TryRecvError::Empty);
-    /// }
+    /// assert_eq!(sub.try_recv().unwrap_err(), TryRecvError::Empty);
     /// ```
     pub fn try_recv(&self) -> Result<M, TryRecvError> {
         Self::try_recv2(&self.broker, &self.bucket.queue)
@@ -717,45 +697,42 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mqb = MessageQueueBroker::unbounded();
-    ///     let sub = mqb.subscribe(1);
+    /// # tokio_test::block_on(async move {
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     assert!(mqb.send(&1, 1).await.is_ok());
-    ///     assert_eq!(sub.recv().await.unwrap(), 1);
-    /// }
+    /// assert!(mqb.send(&1, 1).await.is_ok());
+    /// assert_eq!(sub.recv().await.unwrap(), 1);
+    /// # });
     /// ```
     ///
     /// ### Broker closed
     /// ```
     /// use mqb::{MessageQueueBroker, RecvError};
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mqb = MessageQueueBroker::<i32, i32>::unbounded();
-    ///     let sub = mqb.subscribe(1);
+    /// # tokio_test::block_on(async move {
+    /// let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     mqb.close();
-    ///     assert_eq!(sub.recv().await.unwrap_err(), RecvError);
-    /// }
+    /// mqb.close();
+    /// assert_eq!(sub.recv().await.unwrap_err(), RecvError);
+    /// # });
     /// ```
     ///
     /// ### Queue is empty
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let mqb = MessageQueueBroker::<i32, i32>::bounded(1);
-    ///     let sub = mqb.subscribe(1);
+    /// # tokio_test::block_on(async move {
+    /// let mqb = MessageQueueBroker::<i32, i32>::bounded(1);
+    /// let sub = mqb.subscribe(1);
     ///
-    ///     # async {
-    ///     # let _ =
-    ///     // Wait endlessly...
-    ///     sub.recv().await;
-    ///     # };
-    /// }
+    /// # async {
+    /// # let _ =
+    /// // Wait endlessly...
+    /// sub.recv().await;
+    /// # };
+    /// # });
     /// ```
     pub async fn recv(&self) -> Result<M, RecvError> {
         let mut notified = pin!(self.bucket.recv_notify.notified());
