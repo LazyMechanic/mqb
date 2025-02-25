@@ -135,7 +135,7 @@ where
     /// Until the queue with provided tag has been created (no one has subscribed),
     /// all attempts to send a message will fail.
     pub fn subscribe(&self, tag: T) -> Subscriber<T, M> {
-        self.inner.subscribe(tag)
+        MessageQueueBrokerInner::subscribe(&self.inner, tag)
     }
 }
 
@@ -313,8 +313,8 @@ impl<T, M> MessageQueueBrokerInner<T, M>
 where
     T: Hash + Eq + Clone,
 {
-    fn subscribe(self: &Arc<Self>, tag: T) -> Subscriber<T, M> {
-        let buckets = match &**self {
+    fn subscribe(this: &Arc<Self>, tag: T) -> Subscriber<T, M> {
+        let buckets = match &**this {
             MessageQueueBrokerInner::Bounded(b) => &b.buckets,
             MessageQueueBrokerInner::Unbounded(b) => &b.buckets,
         };
@@ -326,7 +326,7 @@ where
                 Subscriber {
                     tag,
                     bucket,
-                    broker: Arc::clone(self),
+                    broker: Arc::clone(this),
                 }
             }
             Entry::Vacant(e) => {
@@ -340,7 +340,7 @@ where
                 Subscriber {
                     tag,
                     bucket,
-                    broker: Arc::clone(self),
+                    broker: Arc::clone(this),
                 }
             }
         }
