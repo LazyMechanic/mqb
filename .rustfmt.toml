@@ -1,0 +1,8 @@
+# https://github.com/rust-lang/rustfmt/blob/master/Configurations.md
+unstable_features = true
+style_edition = "2024"
+reorder_impl_items = true
+use_field_init_shorthand = true
+imports_granularity = "Crate"
+group_imports = "StdExternalCrate"
+max_width = 80
