@@ -1,6 +1,14 @@
 [package]
 name = "mqb"
 version = "0.1.0"
+description = "Lock free in memory message queue broker"
+authors = ["LazyMechanic <asharnrus@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/LazyMechanic/mqb"
+documentation = "https://docs.rs/mqb"
+keywords = ["queue", "mpmc", "broker", "channel", "chan"]
+categories = ["asynchronous", "concurrency"]
+include = ["src/**/*.rs", "README.md", "LICENSE"]
 edition = "2021"
 
 [dependencies]
