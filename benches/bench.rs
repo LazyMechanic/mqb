@@ -3,13 +3,13 @@ use std::{
 };
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use mqb::{MessageQueueBroker, Subscription};
+use mqb::{MessageQueueBroker, Subscriber};
 use rand::seq::SliceRandom;
 use scc::Equivalent;
 use tokio::{sync::Semaphore, time::Instant};
 
 trait Broker<T, M> {
-    type Subscription: Receiver<T, M>;
+    type Subscriber: Receiver<T, M>;
 
     fn send<Q>(
         &self,
@@ -19,7 +19,7 @@ trait Broker<T, M> {
     where
         Q: Hash + Equivalent<T> + ?Sized + Send + Sync;
 
-    fn subscribe(&self, tag: T) -> Self::Subscription;
+    fn subscribe(&self, tag: T) -> Self::Subscriber;
 }
 
 trait Receiver<T, M> {
@@ -31,7 +31,7 @@ where
     T: Hash + Eq + Clone + Send + Sync,
     M: Send + Sync,
 {
-    type Subscription = Subscription<T, M>;
+    type Subscriber = Subscriber<T, M>;
 
     fn send<Q>(
         &self,
@@ -48,18 +48,18 @@ where
         }
     }
 
-    fn subscribe(&self, tag: T) -> Self::Subscription {
+    fn subscribe(&self, tag: T) -> Self::Subscriber {
         MessageQueueBroker::subscribe(self, tag)
     }
 }
 
-impl<T, M> Receiver<T, M> for Subscription<T, M>
+impl<T, M> Receiver<T, M> for Subscriber<T, M>
 where
     T: Hash + Eq + Send + Sync,
     M: Send + Sync,
 {
     fn recv(&mut self) -> impl Future<Output = Result<M, ()>> + Send {
-        async move { Subscription::recv(self).await.map_err(|_| ()) }
+        async move { Subscriber::recv(self).await.map_err(|_| ()) }
     }
 }
 
@@ -199,7 +199,7 @@ async fn parallel_bench<
 where
     F: Fn() -> B,
     B: Broker<usize, usize> + Send + Sync + 'static,
-    <B as Broker<usize, usize>>::Subscription: Send + 'static,
+    <B as Broker<usize, usize>>::Subscriber: Send + 'static,
 {
     let all_threads = WRITER_THREADS + TAGS * READERS_PER_TAG;
 

@@ -1,3 +1,73 @@
+//! # mqb
+//!
+//! This library provides lock free in memory message queue broker.
+//!
+/// Similar to mpmc channels with a single queue size.
+/// There are two variants of broker: bounded and unbounded.
+/// The bounded variant has a limit on the number of messages that the broker can store,
+/// and if this limit is reached, trying to send another message will wait
+/// until a message is received from the subscriber, the limit is global for all "sub-channels".
+/// An unbounded channel has an infinite capacity, so the send method will always complete immediately.
+///
+/// ### Unbounded example
+/// ```
+/// use mqb::MessageQueueBroker;
+/// use futures::future::FutureExt;
+///
+/// type Tag = i32;
+/// type Message = i32;
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let mqb = MessageQueueBroker::<Tag, Message>::unbounded();
+///     let sub1 = mqb.subscribe(1);
+///     let sub2 = mqb.subscribe(2);
+///     let sub2_another = mqb.subscribe(2);
+///     let sub2_clone = sub2.clone();
+///
+///     let mut tasks = Vec::new();
+///     tasks.push(async move { assert_eq!(sub1.recv().await.unwrap(), 1) }.boxed());
+///     tasks.push(async move { assert!(sub2.recv().await.is_ok()) }.boxed());
+///     tasks.push(async move { assert!(sub2_another.recv().await.is_ok()) }.boxed());
+///     tasks.push(async move { assert!(sub2_clone.recv().await.is_ok()) }.boxed());
+///
+///     mqb.send(&1, 1).await.unwrap();
+///     mqb.send(&2, 1).await.unwrap();
+///     mqb.send(&2, 2).await.unwrap();
+///     mqb.send(&2, 3).await.unwrap();
+///     assert!(mqb.send(&3, 1).await.is_err());
+///
+///     futures::future::join_all(tasks).await;
+/// }
+/// ```
+///
+/// ### Bounded example
+/// ```
+/// use mqb::MessageQueueBroker;
+/// use futures::future::FutureExt;
+///
+/// type Tag = i32;
+/// type Message = i32;
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let mqb = MessageQueueBroker::<Tag, Message>::bounded(2);
+///     let sub1 = mqb.subscribe(1);
+///     let sub2 = mqb.subscribe(2);
+///
+///     let mut tasks = Vec::new();
+///     tasks.push(async move { assert_eq!(sub1.recv().await.unwrap(), 1) }.boxed());
+///     tasks.push(async move { assert!(sub2.recv().await.is_ok()) }.boxed());
+///
+///     mqb.send(&1, 1).await.unwrap();
+///     mqb.send(&2, 1).await.unwrap();
+///     assert!(mqb.try_send(&2, 2).unwrap_err().is_full());
+///     assert!(mqb.try_send(&3, 1).unwrap_err().is_closed());
+///
+///     futures::future::join_all(tasks).await;
+/// }
+/// ```
+
 use std::{
     fmt::{Debug, Formatter},
     hash::Hash,
@@ -23,6 +93,7 @@ mod sync {
     pub use std::sync::{Arc, atomic};
 }
 
+/// Lock free in memory message queue broker for sending values between asynchronous tasks by tags.
 #[derive(Debug)]
 pub struct MessageQueueBroker<T: Hash + Eq, M> {
     inner: Arc<MessageQueueBrokerInner<T, M>>,
@@ -32,6 +103,7 @@ impl<T, M> MessageQueueBroker<T, M>
 where
     T: Hash + Eq + Clone,
 {
+    /// Creates unbounded broker.
     pub fn unbounded() -> Self {
         Self {
             inner: Arc::new(MessageQueueBrokerInner::Unbounded(Unbounded {
@@ -42,6 +114,7 @@ where
         }
     }
 
+    /// Creates bounded broker.
     pub fn bounded(cap: usize) -> Self {
         Self {
             inner: Arc::new(MessageQueueBrokerInner::Bounded(Bounded {
@@ -54,7 +127,14 @@ where
         }
     }
 
-    pub fn subscribe(&self, tag: T) -> Subscription<T, M> {
+    /// Subscribes to the tag.
+    ///
+    /// If a queue with provided tag already exists, a new subscriber to it will be created,
+    /// otherwise a new queue will be created.
+    ///
+    /// Until the queue with provided tag has been created (no one has subscribed),
+    /// all attempts to send a message will fail.
+    pub fn subscribe(&self, tag: T) -> Subscriber<T, M> {
         self.inner.subscribe(tag)
     }
 }
@@ -63,22 +143,80 @@ impl<T, M> MessageQueueBroker<T, M>
 where
     T: Hash + Eq,
 {
+    /// Closes the broker. Sends and receives will fail.
     pub fn close(&self) {
         self.inner.close();
     }
 
+    /// Checks if the broker is closed.
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
     }
 
+    /// Gets the global queue length.
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
+    /// Checks if the global queue is empty.
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
+    /// Trying to send a message with the tag.
+    ///
+    /// If broker is closed, or there are no any subscriber to provided tag then returns `TrySendError::Closed(_)`.
+    /// If the tagged queue is full then returns `TrySendError::Full(_)`.
+    ///
+    /// ### Ok
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// fn main() {
+    ///     let mqb = MessageQueueBroker::unbounded();
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     assert!(mqb.try_send(&1, 1).is_ok());
+    ///     assert_eq!(sub.try_recv().unwrap(), 1);
+    /// }
+    /// ```
+    ///
+    /// ### No subscribers
+    /// ```
+    /// use mqb::{MessageQueueBroker, TrySendError};
+    ///
+    /// fn main() {
+    ///     let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    ///
+    ///     assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Closed(1));
+    /// }
+    /// ```
+    ///
+    /// ### Broker closed
+    /// ```
+    /// use mqb::{MessageQueueBroker, TrySendError};
+    ///
+    /// fn main() {
+    ///     let mqb = MessageQueueBroker::unbounded();
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     mqb.close();
+    ///     assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Closed(1));
+    /// }
+    /// ```
+    ///
+    /// ### Queue is full
+    /// ```
+    /// use mqb::{MessageQueueBroker, TrySendError};
+    ///
+    /// fn main() {
+    ///     let mqb = MessageQueueBroker::bounded(1);
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     assert!(mqb.try_send(&1, 1).is_ok());
+    ///     assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Full(1));
+    /// }
+    /// ```
     pub fn try_send<Q>(&self, tag: &Q, msg: M) -> Result<(), TrySendError<M>>
     where
         Q: Hash + scc::Equivalent<T> + ?Sized,
@@ -86,6 +224,68 @@ where
         self.inner.try_send(tag, msg)
     }
 
+    /// Sends a message with the tag.
+    ///
+    /// If broker is closed, or there are no any subscriber to provided tag then returns `TrySendError::Closed(_)`.
+    /// If the tagged queue is full, it will wait until a slot becomes available.
+    ///
+    /// ### Ok
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mqb = MessageQueueBroker::unbounded();
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     assert!(mqb.send(&1, 1).await.is_ok());
+    ///     assert_eq!(sub.recv().await.unwrap(), 1);
+    /// }
+    /// ```
+    ///
+    /// ### No subscribers
+    /// ```
+    /// use mqb::{MessageQueueBroker, SendError};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    ///
+    ///     assert_eq!(mqb.send(&1, 1).await.unwrap_err(), SendError(1));
+    /// }
+    /// ```
+    ///
+    /// ### Broker closed
+    /// ```
+    /// use mqb::{MessageQueueBroker, SendError};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mqb = MessageQueueBroker::unbounded();
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     mqb.close();
+    ///     assert_eq!(mqb.send(&1, 1).await.unwrap_err(), SendError(1));
+    /// }
+    /// ```
+    ///
+    /// ### Queue is full
+    /// ```
+    /// use mqb::{MessageQueueBroker, TrySendError};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mqb = MessageQueueBroker::bounded(1);
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     assert!(mqb.send(&1, 1).await.is_ok());
+    ///     # async {
+    ///     # let _ =
+    ///     // Wait endlessly...
+    ///     mqb.send(&1, 2).await;
+    ///     # };
+    /// }
+    /// ```
     pub async fn send<Q>(&self, tag: &Q, msg: M) -> Result<(), SendError<M>>
     where
         Q: Hash + scc::Equivalent<T> + ?Sized,
@@ -113,7 +313,7 @@ impl<T, M> MessageQueueBrokerInner<T, M>
 where
     T: Hash + Eq + Clone,
 {
-    fn subscribe(self: &Arc<Self>, tag: T) -> Subscription<T, M> {
+    fn subscribe(self: &Arc<Self>, tag: T) -> Subscriber<T, M> {
         let buckets = match &**self {
             MessageQueueBrokerInner::Bounded(b) => &b.buckets,
             MessageQueueBrokerInner::Unbounded(b) => &b.buckets,
@@ -123,7 +323,7 @@ where
             Entry::Occupied(e) => {
                 let bucket = e.get().clone();
                 bucket.subs.fetch_add(1, Ordering::Release);
-                Subscription {
+                Subscriber {
                     tag,
                     bucket,
                     broker: Arc::clone(self),
@@ -137,7 +337,7 @@ where
                 });
                 e.insert_entry(bucket.clone());
 
-                Subscription {
+                Subscriber {
                     tag,
                     bucket,
                     broker: Arc::clone(self),
@@ -248,6 +448,10 @@ where
     where
         Q: Hash + scc::Equivalent<T> + ?Sized,
     {
+        if self.is_closed() {
+            return Err(TrySendError::Closed(msg));
+        }
+
         let Some(bucket) = self.buckets.get(tag) else {
             return Err(TrySendError::Closed(msg));
         };
@@ -269,6 +473,10 @@ where
         let mut notified = pin!(self.send_notify.notified());
 
         loop {
+            if self.is_closed() {
+                return Err(SendError(msg));
+            }
+
             {
                 let Some(bucket) = self.buckets.get(tag) else {
                     return Err(SendError(msg));
@@ -344,6 +552,10 @@ where
     where
         Q: Hash + scc::Equivalent<T> + ?Sized,
     {
+        if self.is_closed() {
+            return Err(TrySendError::Closed(msg));
+        }
+
         let Some(bucket) = self.buckets.get(tag) else {
             return Err(TrySendError::Closed(msg));
         };
@@ -382,29 +594,68 @@ struct Bucket<M> {
     recv_notify: Notify,
 }
 
+/// Subscriber to the tagged queue created by [`subscribe()`] function.
+///
+/// [`subscribe()`]: crate::MessageQueueBroker::subscribe
 #[derive(Debug)]
-pub struct Subscription<T: Hash + Eq, M> {
+pub struct Subscriber<T: Hash + Eq, M> {
     tag: T,
     bucket: Arc<Bucket<M>>,
     broker: Arc<MessageQueueBrokerInner<T, M>>,
 }
 
-impl<T, M> Subscription<T, M>
+impl<T, M> Subscriber<T, M>
 where
     T: Hash + Eq,
 {
+    /// Returns the number of subscribers of the same tag.
     pub fn subs_count(&self) -> usize {
         self.bucket.subs.load(Ordering::Acquire)
     }
 
+    /// Returns length of tagged queue.
+    ///
+    /// ### Example
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mqb = MessageQueueBroker::unbounded();
+    ///     let sub1 = mqb.subscribe(1);
+    ///     let sub2 = mqb.subscribe(2);
+    ///
+    ///     mqb.send(&2, 1).await.unwrap();
+    ///     assert_eq!(sub1.len(), 0);
+    ///     assert_eq!(sub2.len(), mqb.len());
+    /// }
+    /// ```
     pub fn len(&self) -> usize {
         self.bucket.queue.len()
     }
 
+    /// Checks if the tagged queue is empty.
+    ///
+    /// ### Example
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mqb = MessageQueueBroker::unbounded();
+    ///     let sub1 = mqb.subscribe(1);
+    ///     let sub2 = mqb.subscribe(2);
+    ///
+    ///     mqb.send(&2, 1).await.unwrap();
+    ///     assert!(sub1.is_empty());
+    ///     assert_eq!(sub2.len(), mqb.len());
+    /// }
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Checks if the broker is closed.
     pub fn is_closed(&self) -> bool {
         match &*self.broker {
             MessageQueueBrokerInner::Bounded(b) => b.is_closed(),
@@ -412,10 +663,100 @@ where
         }
     }
 
+    /// Trying to receive a message from the tagged queue.
+    ///
+    /// If broker is closed then returns `TryRecvError::Closed`.
+    /// If the tagged queue is empty returns `TryRecvError::Empty`.
+    ///
+    /// ### Ok
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// fn main() {
+    ///     let mqb = MessageQueueBroker::unbounded();
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     assert!(mqb.try_send(&1, 1).is_ok());
+    ///     assert_eq!(sub.try_recv().unwrap(), 1);
+    /// }
+    /// ```
+    ///
+    /// ### Broker closed
+    /// ```
+    /// use mqb::{MessageQueueBroker, TryRecvError};
+    ///
+    /// fn main() {
+    ///     let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     mqb.close();
+    ///     assert_eq!(sub.try_recv().unwrap_err(), TryRecvError::Closed);
+    /// }
+    /// ```
+    ///
+    /// ### Queue is empty
+    /// ```
+    /// use mqb::{MessageQueueBroker, TryRecvError};
+    ///
+    /// fn main() {
+    ///     let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     assert_eq!(sub.try_recv().unwrap_err(), TryRecvError::Empty);
+    /// }
+    /// ```
     pub fn try_recv(&self) -> Result<M, TryRecvError> {
         Self::try_recv2(&self.broker, &self.bucket.queue)
     }
 
+    /// Receives a message from the tagged queue.
+    ///
+    /// If broker is closed then returns `RecvError`.
+    ///
+    /// ### Ok
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mqb = MessageQueueBroker::unbounded();
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     assert!(mqb.send(&1, 1).await.is_ok());
+    ///     assert_eq!(sub.recv().await.unwrap(), 1);
+    /// }
+    /// ```
+    ///
+    /// ### Broker closed
+    /// ```
+    /// use mqb::{MessageQueueBroker, RecvError};
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     mqb.close();
+    ///     assert_eq!(sub.recv().await.unwrap_err(), RecvError);
+    /// }
+    /// ```
+    ///
+    /// ### Queue is empty
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let mqb = MessageQueueBroker::<i32, i32>::bounded(1);
+    ///     let sub = mqb.subscribe(1);
+    ///
+    ///     # async {
+    ///     # let _ =
+    ///     // Wait endlessly...
+    ///     sub.recv().await;
+    ///     # };
+    /// }
+    /// ```
     pub async fn recv(&self) -> Result<M, RecvError> {
         let mut notified = pin!(self.bucket.recv_notify.notified());
 
@@ -461,7 +802,7 @@ where
     }
 }
 
-impl<T, M> Clone for Subscription<T, M>
+impl<T, M> Clone for Subscriber<T, M>
 where
     T: Hash + Eq + Clone,
 {
@@ -475,7 +816,7 @@ where
     }
 }
 
-impl<T, M> Drop for Subscription<T, M>
+impl<T, M> Drop for Subscriber<T, M>
 where
     T: Hash + Eq,
 {
