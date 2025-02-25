@@ -1,0 +1,27 @@
+[package]
+name = "mqb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+crossbeam = "0.8.4"
+loom = { version = "0.7.2", optional = true }
+scc = { version = "2.3.3", features = ["equivalent"] }
+thiserror = "2.0.11"
+tokio = { version = "1.39.2", features = ["sync"] }
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["async_tokio"] }
+futures = "0.3.31"
+num_cpus = "1.16.0"
+rand = "0.9.0"
+tokio = { version = "1.39.2", features = ["full"] }
+
+[features]
+default = []
+
+loom = ["dep:loom", "scc/loom"]
+
+[[bench]]
+name = "bench"
+harness = false
