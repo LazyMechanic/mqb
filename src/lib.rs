@@ -72,26 +72,15 @@ use std::{
     fmt::{Debug, Formatter},
     hash::Hash,
     pin::pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
 use crossbeam::queue::SegQueue;
 use scc::hash_map::Entry;
 use tokio::sync::Notify;
-
-use self::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
-
-#[cfg(feature = "loom")]
-mod sync {
-    pub use loom::sync::{Arc, atomic};
-}
-
-#[cfg(not(feature = "loom"))]
-mod sync {
-    pub use std::sync::{Arc, atomic};
-}
 
 /// Lock free in memory message queue broker for sending values between asynchronous tasks by tags.
 #[derive(Debug)]
@@ -902,46 +891,11 @@ impl TryRecvError {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
 
     use rand::prelude::SliceRandom;
     use tokio::sync::Semaphore;
 
     use super::*;
-
-    fn loom_model<F>(f: F)
-    where
-        F: Fn() + Sync + Send + 'static,
-    {
-        #[cfg(not(feature = "loom"))]
-        {
-            f()
-        }
-
-        #[cfg(feature = "loom")]
-        {
-            loom::model(f);
-        }
-    }
-
-    fn loom_async_model<F, R>(f: F)
-    where
-        F: Fn() -> R + Sync + Send + 'static,
-        R: Future<Output = ()> + 'static,
-    {
-        let f = move || {
-            let fut = f();
-            let body = pin!(fut);
-
-            return tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("failed building the Runtime")
-                .block_on(body);
-        };
-
-        loom_model(f)
-    }
 
     async fn parallel_check<
         const WRITER_THREADS: usize,
@@ -1032,128 +986,105 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unbounded_parallel() {
-        loom_async_model(|| async {
-            parallel_check::<1, 1000, 1, 1>(MessageQueueBroker::unbounded())
-                .await;
-            parallel_check::<20, 1000, 100, 1>(MessageQueueBroker::unbounded())
-                .await;
-            parallel_check::<20, 1000, 100, 2>(MessageQueueBroker::unbounded())
-                .await;
-        });
+    #[tokio::test]
+    async fn unbounded_parallel() {
+        parallel_check::<1, 1000, 1, 1>(MessageQueueBroker::unbounded()).await;
+        parallel_check::<20, 1000, 100, 1>(MessageQueueBroker::unbounded())
+            .await;
+        parallel_check::<20, 1000, 100, 2>(MessageQueueBroker::unbounded())
+            .await;
     }
 
-    #[test]
-    fn bounded_parallel() {
-        loom_async_model(|| async {
-            parallel_check::<1, 1000, 1, 1>(MessageQueueBroker::bounded(10))
-                .await;
-            parallel_check::<20, 1000, 100, 1>(MessageQueueBroker::bounded(10))
-                .await;
-            parallel_check::<20, 1000, 100, 2>(MessageQueueBroker::bounded(10))
-                .await;
-        });
+    #[tokio::test]
+    async fn bounded_parallel() {
+        parallel_check::<1, 1000, 1, 1>(MessageQueueBroker::bounded(10)).await;
+        parallel_check::<20, 1000, 100, 1>(MessageQueueBroker::bounded(10))
+            .await;
+        parallel_check::<20, 1000, 100, 2>(MessageQueueBroker::bounded(10))
+            .await;
     }
 
-    #[test]
-    fn unbounded() {
-        loom_async_model(|| async {
-            let mbq = MessageQueueBroker::unbounded();
+    #[tokio::test]
+    async fn unbounded() {
+        let mbq = MessageQueueBroker::unbounded();
 
-            let sub1 = mbq.subscribe(1);
-            let sub2 = mbq.subscribe(2);
+        let sub1 = mbq.subscribe(1);
+        let sub2 = mbq.subscribe(2);
 
-            mbq.send(&1, 1).await.unwrap();
-            mbq.send(&2, 2).await.unwrap();
-            assert_eq!(mbq.len(), 2);
-            assert_eq!(
-                mbq.try_send(&3, 42).unwrap_err(),
-                TrySendError::Closed(42)
-            );
-            assert_eq!(mbq.len(), 2);
+        mbq.send(&1, 1).await.unwrap();
+        mbq.send(&2, 2).await.unwrap();
+        assert_eq!(mbq.len(), 2);
+        assert_eq!(mbq.try_send(&3, 42).unwrap_err(), TrySendError::Closed(42));
+        assert_eq!(mbq.len(), 2);
 
-            assert_eq!(sub1.len(), 1);
-            assert_eq!(sub1.recv().await, Ok(1));
-            assert_eq!(sub1.len(), 0);
-            assert_eq!(mbq.len(), 1);
+        assert_eq!(sub1.len(), 1);
+        assert_eq!(sub1.recv().await, Ok(1));
+        assert_eq!(sub1.len(), 0);
+        assert_eq!(mbq.len(), 1);
 
-            assert_eq!(sub2.len(), 1);
-            assert_eq!(sub2.recv().await, Ok(2));
-            assert_eq!(sub2.len(), 0);
-            assert_eq!(mbq.len(), 0);
+        assert_eq!(sub2.len(), 1);
+        assert_eq!(sub2.recv().await, Ok(2));
+        assert_eq!(sub2.len(), 0);
+        assert_eq!(mbq.len(), 0);
 
-            assert!(mbq.is_empty());
-        });
+        assert!(mbq.is_empty());
     }
 
-    #[test]
-    fn bounded() {
-        loom_async_model(|| async {
-            let mqb = MessageQueueBroker::bounded(2);
+    #[tokio::test]
+    async fn bounded() {
+        let mqb = MessageQueueBroker::bounded(2);
 
-            let sub1 = mqb.subscribe(1);
-            let sub2 = mqb.subscribe(2);
+        let sub1 = mqb.subscribe(1);
+        let sub2 = mqb.subscribe(2);
 
-            mqb.send(&1, 1).await.unwrap();
-            mqb.send(&2, 2).await.unwrap();
-            assert_eq!(mqb.len(), 2);
-            assert_eq!(
-                mqb.try_send(&3, 42).unwrap_err(),
-                TrySendError::Closed(42)
-            );
-            assert_eq!(mqb.try_send(&2, 3).unwrap_err(), TrySendError::Full(3));
-            assert_eq!(mqb.len(), 2);
+        mqb.send(&1, 1).await.unwrap();
+        mqb.send(&2, 2).await.unwrap();
+        assert_eq!(mqb.len(), 2);
+        assert_eq!(mqb.try_send(&3, 42).unwrap_err(), TrySendError::Closed(42));
+        assert_eq!(mqb.try_send(&2, 3).unwrap_err(), TrySendError::Full(3));
+        assert_eq!(mqb.len(), 2);
 
-            assert_eq!(sub1.len(), 1);
-            assert_eq!(sub1.recv().await, Ok(1));
-            assert_eq!(sub1.len(), 0);
-            assert_eq!(mqb.len(), 1);
+        assert_eq!(sub1.len(), 1);
+        assert_eq!(sub1.recv().await, Ok(1));
+        assert_eq!(sub1.len(), 0);
+        assert_eq!(mqb.len(), 1);
 
-            assert_eq!(sub2.len(), 1);
-            assert_eq!(sub2.recv().await, Ok(2));
-            assert_eq!(sub2.len(), 0);
-            assert_eq!(mqb.len(), 0);
+        assert_eq!(sub2.len(), 1);
+        assert_eq!(sub2.recv().await, Ok(2));
+        assert_eq!(sub2.len(), 0);
+        assert_eq!(mqb.len(), 0);
 
-            assert!(mqb.is_empty());
-        })
+        assert!(mqb.is_empty());
     }
 
-    #[test]
-    fn sub_unsub() {
-        loom_async_model(|| async {
-            let mqb = MessageQueueBroker::unbounded();
+    #[tokio::test]
+    async fn sub_unsub() {
+        let mqb = MessageQueueBroker::unbounded();
 
-            let sub1 = mqb.subscribe(1);
-            let sub1_copy1 = mqb.subscribe(1);
-            let sub1_copy2 = sub1.clone();
+        let sub1 = mqb.subscribe(1);
+        let sub1_copy1 = mqb.subscribe(1);
+        let sub1_copy2 = sub1.clone();
 
-            assert_eq!(sub1.subs_count(), 3);
+        assert_eq!(sub1.subs_count(), 3);
 
-            drop(sub1_copy1);
-            assert_eq!(sub1.subs_count(), 2);
+        drop(sub1_copy1);
+        assert_eq!(sub1.subs_count(), 2);
 
-            drop(sub1_copy2);
-            assert_eq!(sub1.subs_count(), 1);
+        drop(sub1_copy2);
+        assert_eq!(sub1.subs_count(), 1);
 
-            drop(sub1);
-            assert_eq!(
-                mqb.try_send(&1, 1).unwrap_err(),
-                TrySendError::Closed(1)
-            );
-            assert_eq!(mqb.send(&1, 1).await.unwrap_err(), SendError(1));
-        });
+        drop(sub1);
+        assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Closed(1));
+        assert_eq!(mqb.send(&1, 1).await.unwrap_err(), SendError(1));
     }
 
-    #[test]
-    fn close() {
-        loom_model(|| {
-            let mqb = MessageQueueBroker::<i32, i32>::unbounded();
-            let sub1 = mqb.subscribe(1);
+    #[tokio::test]
+    async fn close() {
+        let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+        let sub1 = mqb.subscribe(1);
 
-            assert!(!sub1.is_closed());
-            drop(mqb);
-            assert!(sub1.is_closed());
-        });
+        assert!(!sub1.is_closed());
+        drop(mqb);
+        assert!(sub1.is_closed());
     }
 }
