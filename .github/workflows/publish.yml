@@ -1,0 +1,102 @@
+name: Publish
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  docs_and_spell_check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTDOCFLAGS: "-Dwarnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 'Check spelling'
+        uses: crate-ci/typos@master
+      - run: cargo doc --no-deps
+
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+          components: clippy
+
+      - name: 'Clippy'
+        run: cargo clippy --all-features -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+
+      - name: 'Test'
+        run: cargo nextest run --all-features
+
+  semver-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: 'Check semver'
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+
+  crates_io_publish:
+    name: 'Publish (crates.io)'
+    needs:
+      - test
+      - semver-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 'cargo-release Cache'
+        id: cargo_release_cache
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/bin/cargo-release
+          key: ${{ runner.os }}-cargo-release
+
+      - run: cargo install cargo-release
+        if: steps.cargo_release_cache.outputs.cache-hit != 'true'
+
+      - name: 'cargo login'
+        run: cargo login ${{ secrets.CRATES_IO_API_TOKEN }}
+
+      # allow-branch HEAD is because GitHub actions switches
+      # to the tag while building, which is a detached head
+      - name: 'cargo release publish'
+        run: |-
+          cargo release \
+            publish \
+            --workspace \
+            --all-features \
+            --allow-branch master,HEAD \
+            --no-confirm \
+            --no-verify \
+            --execute
