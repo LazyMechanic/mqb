@@ -46,6 +46,20 @@ jobs:
       - name: 'Clippy'
         run: cargo clippy --all-features -- -D warnings
 
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-binstall
+
+      - run: cargo binstall --no-confirm cargo-msrv
+      - run: cargo msrv --version
+      - run: cargo msrv verify
+      - if: ${{ failure() }}
+        run: cargo msrv find
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20

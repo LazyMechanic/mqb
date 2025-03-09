@@ -808,7 +808,7 @@ impl<T> SendError<T> {
 
 impl<T> Debug for SendError<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("SendError").finish_non_exhaustive()
+        write!(f, "SendError(..)")
     }
 }
 
@@ -849,12 +849,8 @@ impl<T> TrySendError<T> {
 impl<T> Debug for TrySendError<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            TrySendError::Full(_) => {
-                f.debug_tuple("Full").finish_non_exhaustive()
-            }
-            TrySendError::Closed(_) => {
-                f.debug_tuple("Closed").finish_non_exhaustive()
-            }
+            TrySendError::Full(_) => write!(f, "Full(..)"),
+            TrySendError::Closed(_) => write!(f, "Closed(..)"),
         }
     }
 }

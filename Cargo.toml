@@ -10,12 +10,13 @@ keywords = ["queue", "mpmc", "broker", "channel", "chan"]
 categories = ["asynchronous", "concurrency"]
 include = ["src/**/*.rs", "README.md", "LICENSE"]
 edition = "2021"
+rust-version = "1.74"
 
 [dependencies]
-crossbeam = "0.8.4"
-scc = { version = "2.3.3", features = ["equivalent"] }
-thiserror = "2.0.11"
-tokio = { version = "1.39.2", features = ["sync"] }
+crossbeam = "0.8"
+scc = { version = "2.3", features = ["equivalent"] }
+thiserror = "2.0"
+tokio = { version = "1.0", features = ["sync"] }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["async_tokio"] }
