@@ -8,7 +8,7 @@ This library provides lock free in memory message queue broker.
 
 ```toml
 [dependencies]
-mqb = "0.1"
+mqb = "0.2"
 ```
 
 ## Usage example
