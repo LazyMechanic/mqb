@@ -83,6 +83,7 @@ use std::{
 
 use crossbeam::queue::SegQueue;
 use event_listener::{Event, EventListener, IntoNotification, listener};
+use event_listener_strategy::{EventListenerFuture, FutureWrapper, Strategy};
 use futures::Stream;
 use pin_project::{pin_project, pinned_drop};
 use scc::hash_map::Entry;
@@ -766,16 +767,54 @@ where
     /// # };
     /// # });
     /// ```
-    pub async fn recv(&self) -> Result<M, RecvError> {
-        loop {
-            listener!(self.bucket.recv_notify => listener);
+    pub fn recv(&self) -> Recv<'_, T, M> {
+        Recv::_new(RecvInner {
+            sub: self,
+            listener: None,
+            _pin: Default::default(),
+        })
+    }
 
-            match self.try_recv() {
-                Ok(msg) => return Ok(msg),
-                Err(TryRecvError::Closed) => return Err(RecvError),
-                Err(TryRecvError::Empty) => listener.await,
-            }
-        }
+    /// Receives a message from the tagged queue using the blocking strategy.
+    ///
+    /// If broker is closed then returns `RecvError`.
+    ///
+    /// ### Ok
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub = mqb.subscribe(1);
+    ///
+    /// assert!(mqb.try_send(&1, 1).is_ok());
+    /// assert_eq!(sub.recv_blocking().unwrap(), 1);
+    /// ```
+    ///
+    /// ### Broker closed
+    /// ```
+    /// use mqb::{MessageQueueBroker, RecvError};
+    ///
+    /// let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    /// let sub = mqb.subscribe(1);
+    ///
+    /// mqb.close();
+    /// assert_eq!(sub.recv_blocking().unwrap_err(), RecvError);
+    /// ```
+    ///
+    /// ### Queue is empty
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// let mqb = MessageQueueBroker::<i32, i32>::bounded(1);
+    /// let sub = mqb.subscribe(1);
+    ///
+    /// # stringify!(
+    /// // Wait endlessly...
+    /// sub.recv_blocking();
+    /// # );
+    /// ```
+    pub fn recv_blocking(&self) -> Result<M, RecvError> {
+        self.recv().wait()
     }
 
     /// Returns the associated tag.
@@ -877,6 +916,94 @@ where
     }
 }
 
+#[pin_project]
+/// A future returned by [`Subscriber::recv()`].
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct Recv<'a, T: Hash + Eq, M> {
+    #[pin]
+    inner: FutureWrapper<RecvInner<'a, T, M>>,
+}
+
+impl<'a, T, M> Recv<'a, T, M>
+where
+    T: Hash + Eq,
+{
+    #[inline]
+    fn _new(inner: RecvInner<'a, T, M>) -> Self {
+        Self {
+            inner: FutureWrapper::new(inner),
+        }
+    }
+
+    #[inline]
+    fn wait(self) -> Result<M, RecvError> {
+        self.inner.into_inner().wait()
+    }
+}
+impl<'a, T, M> Future for Recv<'a, T, M>
+where
+    T: Hash + Eq,
+{
+    type Output = Result<M, RecvError>;
+
+    #[inline]
+    fn poll(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Self::Output> {
+        self.project().inner.poll(context)
+    }
+}
+
+#[pin_project]
+#[derive(Debug)]
+pub struct RecvInner<'a, T: Hash + Eq, M> {
+    // Reference to the receiver.
+    sub: &'a Subscriber<T, M>,
+
+    // Listener waiting on the channel.
+    listener: Option<EventListener>,
+
+    // Keeping this type `!Unpin` enables future optimizations.
+    #[pin]
+    _pin: PhantomPinned,
+}
+
+impl<'a, T, M> EventListenerFuture for RecvInner<'a, T, M>
+where
+    T: Hash + Eq,
+{
+    type Output = Result<M, RecvError>;
+
+    /// Run this future with the given `Strategy`.
+    fn poll_with_strategy<'x, S: Strategy<'x>>(
+        self: Pin<&mut Self>,
+        strategy: &mut S,
+        cx: &mut S::Context,
+    ) -> Poll<Self::Output> {
+        let this = self.project();
+
+        loop {
+            // Attempt to receive a message.
+            match this.sub.try_recv() {
+                Ok(msg) => return Poll::Ready(Ok(msg)),
+                Err(TryRecvError::Closed) => {
+                    return Poll::Ready(Err(RecvError));
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+
+            // Receiving failed - now start listening for notifications or wait for one.
+            if this.listener.is_some() {
+                // Poll using the given strategy
+                ready!(S::poll(strategy, &mut *this.listener, cx));
+            } else {
+                *this.listener = Some(this.sub.bucket.recv_notify.listen());
+            }
+        }
+    }
+}
+
 #[derive(thiserror::Error, Eq, PartialEq)]
 #[error("sending into a closed channel")]
 pub struct SendError<T>(pub T);
@@ -969,17 +1096,24 @@ impl TryRecvError {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::pin;
+
     use futures::StreamExt;
     use rand::prelude::SliceRandom;
     use tokio::sync::Semaphore;
 
     use super::*;
 
-    trait Receiver<T, M>: From<Subscriber<T, M>>
+    trait Receiver<T, M>
     where
         T: Hash + Eq,
     {
-        fn next(&mut self) -> impl Future<Output = Option<M>> + Send;
+        fn next(self: Pin<&mut Self>)
+        -> impl Future<Output = Option<M>> + Send;
+
+        fn new(v: Subscriber<T, M>) -> Self
+        where
+            Self: Sized;
     }
 
     struct RecvMethodReceiver<T: Hash + Eq, M>(Subscriber<T, M>);
@@ -988,35 +1122,41 @@ mod tests {
         T: Hash + Eq + Send + Sync,
         M: Send,
     {
-        fn next(&mut self) -> impl Future<Output = Option<M>> + Send {
-            async { self.0.recv().await.ok() }
+        fn next(
+            self: Pin<&mut Self>,
+        ) -> impl Future<Output = Option<M>> + Send {
+            async move { self.0.recv().await.ok() }
         }
-    }
-    impl<T, M> From<Subscriber<T, M>> for RecvMethodReceiver<T, M>
-    where
-        T: Hash + Eq,
-    {
-        fn from(value: Subscriber<T, M>) -> Self {
-            Self(value)
+
+        fn new(v: Subscriber<T, M>) -> Self
+        where
+            Self: Sized,
+        {
+            Self(v)
         }
     }
 
-    struct StreamReceiver<T: Hash + Eq, M>(Subscriber<T, M>);
+    #[pin_project]
+    struct StreamReceiver<T: Hash + Eq, M>(#[pin] Subscriber<T, M>);
     impl<T, M> Receiver<T, M> for StreamReceiver<T, M>
     where
         T: Hash + Eq + Send + Sync,
         M: Send,
     {
-        fn next(&mut self) -> impl Future<Output = Option<M>> + Send {
-            async { self.0.next().await }
+        fn next(
+            self: Pin<&mut Self>,
+        ) -> impl Future<Output = Option<M>> + Send {
+            async move {
+                let mut this = self.project();
+                this.0.next().await
+            }
         }
-    }
-    impl<T, M> From<Subscriber<T, M>> for StreamReceiver<T, M>
-    where
-        T: Hash + Eq,
-    {
-        fn from(value: Subscriber<T, M>) -> Self {
-            Self(value)
+
+        fn new(v: Subscriber<T, M>) -> Self
+        where
+            Self: Sized,
+        {
+            Self(v)
         }
     }
 
@@ -1092,11 +1232,11 @@ mod tests {
                 let start_notify = start_notify.clone();
                 let messages_per_reader = messages_per_readers[thread_idx];
                 let fut = async move {
-                    let mut receiver = R::from(sub);
+                    let mut receiver = pin!(R::new(sub));
                     let _permit = start_notify.acquire().await.unwrap();
 
                     for _ in 0..messages_per_reader {
-                        receiver.next().await.unwrap();
+                        receiver.as_mut().next().await.unwrap();
                     }
                 };
 
@@ -1234,8 +1374,8 @@ mod tests {
     async fn unbounded_stream() {
         let mbq = MessageQueueBroker::unbounded();
 
-        let mut sub1 = mbq.subscribe(1);
-        let mut sub2 = mbq.subscribe(2);
+        let mut sub1 = pin!(mbq.subscribe(1));
+        let mut sub2 = pin!(mbq.subscribe(2));
 
         mbq.send(&1, 1).await.unwrap();
         mbq.send(&2, 2).await.unwrap();
@@ -1260,8 +1400,8 @@ mod tests {
     async fn bounded_stream() {
         let mqb = MessageQueueBroker::bounded(2);
 
-        let mut sub1 = mqb.subscribe(1);
-        let mut sub2 = mqb.subscribe(2);
+        let mut sub1 = pin!(mqb.subscribe(1));
+        let mut sub2 = pin!(mqb.subscribe(2));
 
         mqb.send(&1, 1).await.unwrap();
         mqb.send(&2, 2).await.unwrap();
