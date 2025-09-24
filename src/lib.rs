@@ -82,7 +82,7 @@ use std::{
 };
 
 use crossbeam::queue::SegQueue;
-use event_listener::{Event, EventListener, IntoNotification, listener};
+use event_listener::{Event, EventListener, IntoNotification};
 use event_listener_strategy::{EventListenerFuture, FutureWrapper, Strategy};
 use futures::Stream;
 use pin_project::{pin_project, pinned_drop};
@@ -269,11 +269,77 @@ where
     /// # };
     /// # });
     /// ```
-    pub async fn send<Q>(&self, tag: &Q, msg: M) -> Result<(), SendError<M>>
+    pub fn send<'a, Q>(&'a self, tag: &'a Q, msg: M) -> Send<'a, T, M, Q>
     where
         Q: Hash + scc::Equivalent<T> + ?Sized,
     {
-        self.inner.send(tag, msg).await
+        Send::new(SendInner {
+            broker: self,
+            msg: Some(msg),
+            tag: Some(tag),
+            listener: None,
+            _pin: Default::default(),
+        })
+    }
+
+    /// Sends a message with the tag.
+    ///
+    /// If broker is closed, or there are no any subscriber to provided tag then returns `TrySendError::Closed(_)`.
+    /// If the tagged queue is full, it will wait until a slot becomes available.
+    ///
+    /// ### Ok
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub = mqb.subscribe(1);
+    ///
+    /// assert!(mqb.send_blocking(&1, 1).is_ok());
+    /// assert_eq!(sub.recv_blocking().unwrap(), 1);
+    /// ```
+    ///
+    /// ### No subscribers
+    /// ```
+    /// use mqb::{MessageQueueBroker, SendError};
+    ///
+    /// let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    ///
+    /// assert_eq!(mqb.send_blocking(&1, 1).unwrap_err(), SendError(1));
+    /// ```
+    ///
+    /// ### Broker closed
+    /// ```
+    /// use mqb::{MessageQueueBroker, SendError};
+    ///
+    /// let mqb = MessageQueueBroker::unbounded();
+    /// let sub = mqb.subscribe(1);
+    ///
+    /// mqb.close();
+    /// assert_eq!(mqb.send_blocking(&1, 1).unwrap_err(), SendError(1));
+    /// ```
+    ///
+    /// ### Queue is full
+    /// ```
+    /// use mqb::{MessageQueueBroker, TrySendError};
+    ///
+    /// let mqb = MessageQueueBroker::bounded(1);
+    /// let sub = mqb.subscribe(1);
+    ///
+    /// assert!(mqb.send_blocking(&1, 1).is_ok());
+    /// # stringify!(
+    /// // Wait endlessly...
+    /// mqb.send_blocking(&1, 2);
+    /// # );
+    /// ```
+    pub fn send_blocking<'a, Q>(
+        &'a self,
+        tag: &'a Q,
+        msg: M,
+    ) -> Result<(), SendError<M>>
+    where
+        Q: Hash + scc::Equivalent<T> + ?Sized,
+    {
+        self.send(tag, msg).wait()
     }
 }
 
@@ -387,16 +453,6 @@ where
         }
     }
 
-    async fn send<Q>(&self, tag: &Q, msg: M) -> Result<(), SendError<M>>
-    where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
-    {
-        match self {
-            MessageQueueBrokerInner::Bounded(b) => b.send(tag, msg).await,
-            MessageQueueBrokerInner::Unbounded(b) => b.send(tag, msg).await,
-        }
-    }
-
     fn unsubscribe<Q>(&self, tag: &Q)
     where
         Q: Hash + scc::Equivalent<T> + ?Sized,
@@ -461,33 +517,6 @@ where
                 Ok(())
             }
             Err(_) => Err(TrySendError::Full(msg)),
-        }
-    }
-
-    async fn send<Q>(&self, tag: &Q, msg: M) -> Result<(), SendError<M>>
-    where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
-    {
-        loop {
-            if self.is_closed() {
-                return Err(SendError(msg));
-            }
-
-            listener!(self.send_notify => listener);
-
-            {
-                let Some(bucket) = self.buckets.get(tag) else {
-                    return Err(SendError(msg));
-                };
-
-                if self.try_acquire_slot().is_ok() {
-                    bucket.queue.push(msg);
-                    bucket.recv_notify.notify(1.additional());
-                    return Ok(());
-                }
-            }
-
-            listener.await;
         }
     }
 
@@ -559,16 +588,6 @@ where
         bucket.queue.push(msg);
         bucket.recv_notify.notify(1.additional());
         Ok(())
-    }
-
-    async fn send<Q>(&self, tag: &Q, msg: M) -> Result<(), SendError<M>>
-    where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
-    {
-        self.try_send(tag, msg).map_err(|err| match err {
-            TrySendError::Closed(msg) => SendError(msg),
-            TrySendError::Full(_) => unreachable!(),
-        })
     }
 
     fn unsubscribe<Q>(&self, tag: &Q)
@@ -768,7 +787,7 @@ where
     /// # });
     /// ```
     pub fn recv(&self) -> Recv<'_, T, M> {
-        Recv::_new(RecvInner {
+        Recv::new(RecvInner {
             sub: self,
             listener: None,
             _pin: Default::default(),
@@ -929,7 +948,7 @@ where
     T: Hash + Eq,
 {
     #[inline]
-    fn _new(inner: RecvInner<'a, T, M>) -> Self {
+    fn new(inner: RecvInner<'a, T, M>) -> Self {
         Self {
             inner: FutureWrapper::new(inner),
         }
@@ -940,7 +959,8 @@ where
         self.inner.into_inner().wait()
     }
 }
-impl<'a, T, M> Future for Recv<'a, T, M>
+
+impl<T, M> Future for Recv<'_, T, M>
 where
     T: Hash + Eq,
 {
@@ -958,7 +978,6 @@ where
 #[pin_project]
 #[derive(Debug)]
 pub struct RecvInner<'a, T: Hash + Eq, M> {
-    // Reference to the receiver.
     sub: &'a Subscriber<T, M>,
 
     // Listener waiting on the channel.
@@ -969,7 +988,7 @@ pub struct RecvInner<'a, T: Hash + Eq, M> {
     _pin: PhantomPinned,
 }
 
-impl<'a, T, M> EventListenerFuture for RecvInner<'a, T, M>
+impl<T, M> EventListenerFuture for RecvInner<'_, T, M>
 where
     T: Hash + Eq,
 {
@@ -999,6 +1018,119 @@ where
                 ready!(S::poll(strategy, &mut *this.listener, cx));
             } else {
                 *this.listener = Some(this.sub.bucket.recv_notify.listen());
+            }
+        }
+    }
+}
+
+#[pin_project]
+/// A future returned by [`MessageQueueBroker::send()`].
+#[must_use = "futures do nothing unless you `.await` or poll them"]
+pub struct Send<'a, T: Hash + Eq, M, Q: ?Sized> {
+    #[pin]
+    inner: FutureWrapper<SendInner<'a, T, M, Q>>,
+}
+
+impl<'a, T, M, Q> Send<'a, T, M, Q>
+where
+    T: Hash + Eq,
+    Q: Hash + scc::Equivalent<T> + ?Sized,
+{
+    #[inline]
+    fn new(inner: SendInner<'a, T, M, Q>) -> Self {
+        Self {
+            inner: FutureWrapper::new(inner),
+        }
+    }
+
+    #[inline]
+    fn wait(self) -> Result<(), SendError<M>> {
+        self.inner.into_inner().wait()
+    }
+}
+
+impl<T, M, Q> Future for Send<'_, T, M, Q>
+where
+    T: Hash + Eq,
+    Q: Hash + scc::Equivalent<T> + ?Sized,
+{
+    type Output = Result<(), SendError<M>>;
+
+    #[inline]
+    fn poll(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Self::Output> {
+        self.project().inner.poll(context)
+    }
+}
+
+#[pin_project]
+#[derive(Debug)]
+pub struct SendInner<'a, T: Hash + Eq, M, Q: ?Sized> {
+    broker: &'a MessageQueueBroker<T, M>,
+    msg: Option<M>,
+    tag: Option<&'a Q>,
+
+    // Listener waiting on the channel.
+    listener: Option<EventListener>,
+
+    // Keeping this type `!Unpin` enables future optimizations.
+    #[pin]
+    _pin: PhantomPinned,
+}
+
+impl<T, M, Q> EventListenerFuture for SendInner<'_, T, M, Q>
+where
+    T: Hash + Eq,
+    Q: Hash + scc::Equivalent<T> + ?Sized,
+{
+    type Output = Result<(), SendError<M>>;
+
+    /// Run this future with the given `Strategy`.
+    fn poll_with_strategy<'x, S: Strategy<'x>>(
+        self: Pin<&mut Self>,
+        strategy: &mut S,
+        cx: &mut S::Context,
+    ) -> Poll<Self::Output> {
+        let this = self.project();
+
+        match &*this.broker.inner {
+            MessageQueueBrokerInner::Bounded(broker) => {
+                loop {
+                    let msg = this.msg.take().expect("message should be");
+                    let tag = this.tag.take().expect("tag should be");
+
+                    let res = broker.try_send(tag, msg);
+                    match res {
+                        Ok(v) => return Poll::Ready(Ok(v)),
+                        Err(TrySendError::Closed(msg)) => {
+                            return Poll::Ready(Err(SendError(msg)));
+                        }
+                        // Restore msg and tag
+                        Err(TrySendError::Full(msg)) => {
+                            *this.msg = Some(msg);
+                            *this.tag = Some(tag);
+                        }
+                    }
+
+                    // Receiving failed - now start listening for notifications or wait for one.
+                    if this.listener.is_some() {
+                        // Poll using the given strategy
+                        ready!(S::poll(strategy, &mut *this.listener, cx));
+                    } else {
+                        *this.listener = Some(broker.send_notify.listen());
+                    }
+                }
+            }
+            MessageQueueBrokerInner::Unbounded(broker) => {
+                let msg = this.msg.take().expect("message should be");
+                let tag = this.tag.take().expect("tag should be");
+                let res = broker.try_send(tag, msg).map_err(|err| match err {
+                    TrySendError::Closed(msg) => SendError(msg),
+                    TrySendError::Full(_) => unreachable!(),
+                });
+                Poll::Ready(res)
             }
         }
     }
@@ -1108,8 +1240,9 @@ mod tests {
     where
         T: Hash + Eq,
     {
-        fn next(self: Pin<&mut Self>)
-        -> impl Future<Output = Option<M>> + Send;
+        fn next(
+            self: Pin<&mut Self>,
+        ) -> impl Future<Output = Option<M>> + std::marker::Send;
 
         fn new(v: Subscriber<T, M>) -> Self
         where
@@ -1119,12 +1252,12 @@ mod tests {
     struct RecvMethodReceiver<T: Hash + Eq, M>(Subscriber<T, M>);
     impl<T, M> Receiver<T, M> for RecvMethodReceiver<T, M>
     where
-        T: Hash + Eq + Send + Sync,
-        M: Send,
+        T: Hash + Eq + std::marker::Send + Sync,
+        M: std::marker::Send,
     {
         fn next(
             self: Pin<&mut Self>,
-        ) -> impl Future<Output = Option<M>> + Send {
+        ) -> impl Future<Output = Option<M>> + std::marker::Send {
             async move { self.0.recv().await.ok() }
         }
 
@@ -1140,12 +1273,12 @@ mod tests {
     struct StreamReceiver<T: Hash + Eq, M>(#[pin] Subscriber<T, M>);
     impl<T, M> Receiver<T, M> for StreamReceiver<T, M>
     where
-        T: Hash + Eq + Send + Sync,
-        M: Send,
+        T: Hash + Eq + std::marker::Send + Sync,
+        M: std::marker::Send,
     {
         fn next(
             self: Pin<&mut Self>,
-        ) -> impl Future<Output = Option<M>> + Send {
+        ) -> impl Future<Output = Option<M>> + std::marker::Send {
             async move {
                 let mut this = self.project();
                 this.0.next().await
@@ -1169,7 +1302,7 @@ mod tests {
     >(
         mqb: MessageQueueBroker<usize, usize>,
     ) where
-        R: Receiver<usize, usize> + Send,
+        R: Receiver<usize, usize> + std::marker::Send,
     {
         let all_threads = WRITER_THREADS + TAGS * READERS_PER_TAG;
 
@@ -1417,6 +1550,59 @@ mod tests {
 
         assert_eq!(sub2.len(), 1);
         assert_eq!(sub2.next().await, Some(2));
+        assert_eq!(sub2.len(), 0);
+        assert_eq!(mqb.len(), 0);
+
+        assert!(mqb.is_empty());
+    }
+
+    #[test]
+    fn unbounded_blocking() {
+        let mbq = MessageQueueBroker::unbounded();
+
+        let sub1 = mbq.subscribe(1);
+        let sub2 = mbq.subscribe(2);
+
+        mbq.send_blocking(&1, 1).unwrap();
+        mbq.send_blocking(&2, 2).unwrap();
+        assert_eq!(mbq.len(), 2);
+        assert_eq!(mbq.try_send(&3, 42).unwrap_err(), TrySendError::Closed(42));
+        assert_eq!(mbq.len(), 2);
+
+        assert_eq!(sub1.len(), 1);
+        assert_eq!(sub1.recv_blocking(), Ok(1));
+        assert_eq!(sub1.len(), 0);
+        assert_eq!(mbq.len(), 1);
+
+        assert_eq!(sub2.len(), 1);
+        assert_eq!(sub2.recv_blocking(), Ok(2));
+        assert_eq!(sub2.len(), 0);
+        assert_eq!(mbq.len(), 0);
+
+        assert!(mbq.is_empty());
+    }
+
+    #[test]
+    fn bounded_blocking() {
+        let mqb = MessageQueueBroker::bounded(2);
+
+        let sub1 = mqb.subscribe(1);
+        let sub2 = mqb.subscribe(2);
+
+        mqb.send_blocking(&1, 1).unwrap();
+        mqb.send_blocking(&2, 2).unwrap();
+        assert_eq!(mqb.len(), 2);
+        assert_eq!(mqb.try_send(&3, 42).unwrap_err(), TrySendError::Closed(42));
+        assert_eq!(mqb.try_send(&2, 3).unwrap_err(), TrySendError::Full(3));
+        assert_eq!(mqb.len(), 2);
+
+        assert_eq!(sub1.len(), 1);
+        assert_eq!(sub1.recv_blocking(), Ok(1));
+        assert_eq!(sub1.len(), 0);
+        assert_eq!(mqb.len(), 1);
+
+        assert_eq!(sub2.len(), 1);
+        assert_eq!(sub2.recv_blocking(), Ok(2));
         assert_eq!(sub2.len(), 0);
         assert_eq!(mqb.len(), 0);
 
