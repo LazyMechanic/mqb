@@ -70,17 +70,21 @@
 
 use std::{
     fmt::{Debug, Formatter},
+    future::Future,
     hash::Hash,
-    pin::pin,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    task::{Context, Poll, ready},
 };
 
 use crossbeam::queue::SegQueue;
+use event_listener::{Event, EventListener, IntoNotification, listener};
+use futures::Stream;
+use pin_project::{pin_project, pinned_drop};
 use scc::hash_map::Entry;
-use tokio::sync::Notify;
 
 /// Lock free in memory message queue broker for sending values between asynchronous tasks by tags.
 #[derive(Debug)]
@@ -214,7 +218,7 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// # tokio_test::block_on(async move {
+    /// # futures::executor::block_on(async move {
     /// let mqb = MessageQueueBroker::unbounded();
     /// let sub = mqb.subscribe(1);
     ///
@@ -227,7 +231,7 @@ where
     /// ```
     /// use mqb::{MessageQueueBroker, SendError};
     ///
-    /// # tokio_test::block_on(async move {
+    /// # futures::executor::block_on(async move {
     /// let mqb = MessageQueueBroker::<i32, i32>::unbounded();
     ///
     /// assert_eq!(mqb.send(&1, 1).await.unwrap_err(), SendError(1));
@@ -238,7 +242,7 @@ where
     /// ```
     /// use mqb::{MessageQueueBroker, SendError};
     ///
-    /// # tokio_test::block_on(async move {
+    /// # futures::executor::block_on(async move {
     /// let mqb = MessageQueueBroker::unbounded();
     /// let sub = mqb.subscribe(1);
     ///
@@ -251,7 +255,7 @@ where
     /// ```
     /// use mqb::{MessageQueueBroker, TrySendError};
     ///
-    /// # tokio_test::block_on(async move {
+    /// # futures::executor::block_on(async move {
     /// let mqb = MessageQueueBroker::bounded(1);
     /// let sub = mqb.subscribe(1);
     ///
@@ -315,6 +319,7 @@ where
                     tag,
                     bucket,
                     broker: Arc::clone(this),
+                    listener: None,
                 }
             }
             Entry::Vacant(e) => {
@@ -329,6 +334,7 @@ where
                     tag,
                     bucket,
                     broker: Arc::clone(this),
+                    listener: None,
                 }
             }
         }
@@ -401,7 +407,7 @@ where
 #[derive(Debug)]
 struct Bounded<T: Hash + Eq, M> {
     buckets: scc::HashMap<T, Arc<Bucket<M>>>,
-    send_notify: Notify,
+    send_notify: Event,
     is_closed: AtomicBool,
     len: AtomicUsize,
     cap: usize,
@@ -415,7 +421,7 @@ where
         self.is_closed.store(true, Ordering::Release);
         let mut next_entry = self.buckets.first_entry();
         while let Some(e) = next_entry {
-            e.recv_notify.notify_waiters();
+            e.recv_notify.notify(usize::MAX.additional());
             next_entry = e.next();
         }
     }
@@ -447,7 +453,7 @@ where
         match self.try_acquire_slot() {
             Ok(_) => {
                 bucket.queue.push(msg);
-                bucket.recv_notify.notify_one();
+                bucket.recv_notify.notify(1.additional());
                 Ok(())
             }
             Err(_) => Err(TrySendError::Full(msg)),
@@ -458,29 +464,26 @@ where
     where
         Q: Hash + scc::Equivalent<T> + ?Sized,
     {
-        let mut notified = pin!(self.send_notify.notified());
-
         loop {
             if self.is_closed() {
                 return Err(SendError(msg));
             }
+
+            listener!(self.send_notify => listener);
 
             {
                 let Some(bucket) = self.buckets.get(tag) else {
                     return Err(SendError(msg));
                 };
 
-                notified.as_mut().enable();
-
                 if self.try_acquire_slot().is_ok() {
                     bucket.queue.push(msg);
-                    bucket.recv_notify.notify_one();
+                    bucket.recv_notify.notify(1.additional());
                     return Ok(());
                 }
             }
 
-            notified.as_mut().await;
-            notified.set(self.send_notify.notified());
+            listener.await;
         }
     }
 
@@ -519,7 +522,7 @@ where
         self.is_closed.store(true, Ordering::Release);
         let mut next_entry = self.buckets.first_entry();
         while let Some(e) = next_entry {
-            e.recv_notify.notify_waiters();
+            e.recv_notify.notify(usize::MAX.additional());
             next_entry = e.next();
         }
     }
@@ -550,7 +553,7 @@ where
 
         self.len.fetch_add(1, Ordering::Release);
         bucket.queue.push(msg);
-        bucket.recv_notify.notify_one();
+        bucket.recv_notify.notify(1.additional());
         Ok(())
     }
 
@@ -579,17 +582,19 @@ where
 struct Bucket<M> {
     queue: SegQueue<M>,
     subs: AtomicUsize,
-    recv_notify: Notify,
+    recv_notify: Event,
 }
 
 /// Subscriber to the tagged queue created by [`subscribe()`] function.
 ///
 /// [`subscribe()`]: crate::MessageQueueBroker::subscribe
+#[pin_project(PinnedDrop)]
 #[derive(Debug)]
 pub struct Subscriber<T: Hash + Eq, M> {
     tag: T,
     bucket: Arc<Bucket<M>>,
     broker: Arc<MessageQueueBrokerInner<T, M>>,
+    listener: Option<EventListener>,
 }
 
 impl<T, M> Subscriber<T, M>
@@ -607,7 +612,7 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// # tokio_test::block_on(async move {
+    /// # futures::executor::block_on(async move {
     /// let mqb = MessageQueueBroker::unbounded();
     /// let sub1 = mqb.subscribe(1);
     /// let sub2 = mqb.subscribe(2);
@@ -627,7 +632,7 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// # tokio_test::block_on(async move {
+    /// # futures::executor::block_on(async move {
     /// let mqb = MessageQueueBroker::unbounded();
     /// let sub1 = mqb.subscribe(1);
     /// let sub2 = mqb.subscribe(2);
@@ -686,7 +691,27 @@ where
     /// assert_eq!(sub.try_recv().unwrap_err(), TryRecvError::Empty);
     /// ```
     pub fn try_recv(&self) -> Result<M, TryRecvError> {
-        Self::try_recv2(&self.broker, &self.bucket.queue)
+        match &*self.broker {
+            MessageQueueBrokerInner::Bounded(b) => {
+                if b.is_closed() {
+                    return Err(TryRecvError::Closed);
+                }
+
+                let msg = self.bucket.queue.pop().ok_or(TryRecvError::Empty)?;
+                b.len.fetch_sub(1, Ordering::Release);
+                b.send_notify.notify(1.additional());
+                Ok(msg)
+            }
+            MessageQueueBrokerInner::Unbounded(b) => {
+                if b.is_closed() {
+                    return Err(TryRecvError::Closed);
+                }
+
+                let msg = self.bucket.queue.pop().ok_or(TryRecvError::Empty)?;
+                b.len.fetch_sub(1, Ordering::Release);
+                Ok(msg)
+            }
+        }
     }
 
     /// Receives a message from the tagged queue.
@@ -697,7 +722,7 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// # tokio_test::block_on(async move {
+    /// # futures::executor::block_on(async move {
     /// let mqb = MessageQueueBroker::unbounded();
     /// let sub = mqb.subscribe(1);
     ///
@@ -710,7 +735,7 @@ where
     /// ```
     /// use mqb::{MessageQueueBroker, RecvError};
     ///
-    /// # tokio_test::block_on(async move {
+    /// # futures::executor::block_on(async move {
     /// let mqb = MessageQueueBroker::<i32, i32>::unbounded();
     /// let sub = mqb.subscribe(1);
     ///
@@ -723,7 +748,7 @@ where
     /// ```
     /// use mqb::MessageQueueBroker;
     ///
-    /// # tokio_test::block_on(async move {
+    /// # futures::executor::block_on(async move {
     /// let mqb = MessageQueueBroker::<i32, i32>::bounded(1);
     /// let sub = mqb.subscribe(1);
     ///
@@ -735,52 +760,32 @@ where
     /// # });
     /// ```
     pub async fn recv(&self) -> Result<M, RecvError> {
-        let mut notified = pin!(self.bucket.recv_notify.notified());
-
         loop {
-            notified.as_mut().enable();
+            listener!(self.bucket.recv_notify => listener);
 
-            match Self::try_recv2(&self.broker, &self.bucket.queue) {
+            match self.try_recv() {
                 Ok(msg) => return Ok(msg),
                 Err(TryRecvError::Closed) => return Err(RecvError),
-                Err(TryRecvError::Empty) => {
-                    notified.as_mut().await;
-                    notified.set(self.bucket.recv_notify.notified());
-                }
+                Err(TryRecvError::Empty) => listener.await,
             }
         }
     }
 
     /// Returns the associated tag.
+    ///
+    /// ### Example
+    /// ```
+    /// use mqb::MessageQueueBroker;
+    ///
+    /// # futures::executor::block_on(async move {
+    /// let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+    /// let sub = mqb.subscribe(1);
+    ///
+    /// assert_eq!(sub.tag(), &1);
+    /// # });
+    /// ```
     pub fn tag(&self) -> &T {
         &self.tag
-    }
-
-    fn try_recv2(
-        broker: &MessageQueueBrokerInner<T, M>,
-        bucket_queue: &SegQueue<M>,
-    ) -> Result<M, TryRecvError> {
-        match broker {
-            MessageQueueBrokerInner::Bounded(b) => {
-                if b.is_closed() {
-                    return Err(TryRecvError::Closed);
-                }
-
-                let msg = bucket_queue.pop().ok_or(TryRecvError::Empty)?;
-                b.len.fetch_sub(1, Ordering::Release);
-                b.send_notify.notify_one();
-                Ok(msg)
-            }
-            MessageQueueBrokerInner::Unbounded(b) => {
-                if b.is_closed() {
-                    return Err(TryRecvError::Closed);
-                }
-
-                let msg = bucket_queue.pop().ok_or(TryRecvError::Empty)?;
-                b.len.fetch_sub(1, Ordering::Release);
-                Ok(msg)
-            }
-        }
     }
 }
 
@@ -794,19 +799,72 @@ where
             tag: self.tag.clone(),
             bucket: self.bucket.clone(),
             broker: self.broker.clone(),
+            listener: None,
         }
     }
 }
 
-impl<T, M> Drop for Subscriber<T, M>
+#[pinned_drop]
+impl<T, M> PinnedDrop for Subscriber<T, M>
 where
     T: Hash + Eq,
 {
-    fn drop(&mut self) {
+    fn drop(self: Pin<&mut Self>) {
         if !self.is_closed()
             && self.bucket.subs.fetch_sub(1, Ordering::Relaxed) == 1
         {
             self.broker.unsubscribe(&self.tag);
+        }
+    }
+}
+
+impl<T, M> Stream for Subscriber<T, M>
+where
+    T: Hash + Eq,
+{
+    type Item = M;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        loop {
+            // If this stream is listening for events, first wait for a notification.
+            {
+                let this = self.as_mut().project();
+                if let Some(listener) = this.listener.as_mut() {
+                    ready!(Pin::new(listener).poll(cx));
+                    *this.listener = None;
+                }
+            }
+
+            'internal: loop {
+                // Attempt to receive a message.
+                match self.try_recv() {
+                    Ok(msg) => {
+                        // The stream is not blocked on an event - drop the listener.
+                        let this = self.as_mut().project();
+                        *this.listener = None;
+                        return Poll::Ready(Some(msg));
+                    }
+                    Err(TryRecvError::Closed) => {
+                        // The stream is not blocked on an event - drop the listener.
+                        let this = self.as_mut().project();
+                        *this.listener = None;
+                        return Poll::Ready(None);
+                    }
+                    Err(TryRecvError::Empty) => {}
+                }
+
+                // Receiving failed - now start listening for notifications or wait for one.
+                let this = self.as_mut().project();
+                if this.listener.is_some() {
+                    // Go back to the outer loop to wait for a notification.
+                    break 'internal;
+                } else {
+                    *this.listener = Some(this.bucket.recv_notify.listen());
+                }
+            }
         }
     }
 }
@@ -903,20 +961,68 @@ impl TryRecvError {
 
 #[cfg(test)]
 mod tests {
-
+    use futures::StreamExt;
     use rand::prelude::SliceRandom;
     use tokio::sync::Semaphore;
 
     use super::*;
 
+    trait Receiver<T, M>: From<Subscriber<T, M>>
+    where
+        T: Hash + Eq,
+    {
+        fn next(&mut self) -> impl Future<Output = Option<M>> + Send;
+    }
+
+    struct RecvMethodReceiver<T: Hash + Eq, M>(Subscriber<T, M>);
+    impl<T, M> Receiver<T, M> for RecvMethodReceiver<T, M>
+    where
+        T: Hash + Eq + Send + Sync,
+        M: Send,
+    {
+        fn next(&mut self) -> impl Future<Output = Option<M>> + Send {
+            async { self.0.recv().await.ok() }
+        }
+    }
+    impl<T, M> From<Subscriber<T, M>> for RecvMethodReceiver<T, M>
+    where
+        T: Hash + Eq,
+    {
+        fn from(value: Subscriber<T, M>) -> Self {
+            Self(value)
+        }
+    }
+
+    struct StreamReceiver<T: Hash + Eq, M>(Subscriber<T, M>);
+    impl<T, M> Receiver<T, M> for StreamReceiver<T, M>
+    where
+        T: Hash + Eq + Send + Sync,
+        M: Send,
+    {
+        fn next(&mut self) -> impl Future<Output = Option<M>> + Send {
+            async { self.0.next().await }
+        }
+    }
+    impl<T, M> From<Subscriber<T, M>> for StreamReceiver<T, M>
+    where
+        T: Hash + Eq,
+    {
+        fn from(value: Subscriber<T, M>) -> Self {
+            Self(value)
+        }
+    }
+
     async fn parallel_check<
+        R,
         const WRITER_THREADS: usize,
         const TAGS: usize,
         const MESSAGES_PER_TAG: usize,
         const READERS_PER_TAG: usize,
     >(
         mqb: MessageQueueBroker<usize, usize>,
-    ) {
+    ) where
+        R: Receiver<usize, usize> + Send,
+    {
         let all_threads = WRITER_THREADS + TAGS * READERS_PER_TAG;
 
         let mut gen = rand::rng();
@@ -945,7 +1051,7 @@ mod tests {
                 msgs
             };
             let fut = async move {
-                let _permit = start_notify.acquire().await.unwrap();
+                let _permit = start_notify.acquire().await;
                 for (tag, msg) in messages {
                     mqb.send(&tag, msg).await.unwrap();
                 }
@@ -978,10 +1084,11 @@ mod tests {
                 let start_notify = start_notify.clone();
                 let messages_per_reader = messages_per_readers[thread_idx];
                 let fut = async move {
+                    let mut receiver = R::from(sub);
                     let _permit = start_notify.acquire().await.unwrap();
 
                     for _ in 0..messages_per_reader {
-                        sub.recv().await.unwrap();
+                        receiver.next().await.unwrap();
                     }
                 };
 
@@ -1000,23 +1107,69 @@ mod tests {
 
     #[tokio::test]
     async fn unbounded_parallel() {
-        parallel_check::<1, 1000, 1, 1>(MessageQueueBroker::unbounded()).await;
-        parallel_check::<20, 1000, 100, 1>(MessageQueueBroker::unbounded())
-            .await;
-        parallel_check::<20, 1000, 100, 2>(MessageQueueBroker::unbounded())
-            .await;
+        parallel_check::<RecvMethodReceiver<_, _>, 1, 1000, 1, 1>(
+            MessageQueueBroker::unbounded(),
+        )
+        .await;
+        parallel_check::<RecvMethodReceiver<_, _>, 20, 1000, 100, 1>(
+            MessageQueueBroker::unbounded(),
+        )
+        .await;
+        parallel_check::<RecvMethodReceiver<_, _>, 20, 1000, 100, 2>(
+            MessageQueueBroker::unbounded(),
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn bounded_parallel() {
-        parallel_check::<1, 1000, 1, 1>(MessageQueueBroker::bounded(10)).await;
-        parallel_check::<20, 1000, 100, 1>(MessageQueueBroker::bounded(10))
-            .await;
-        parallel_check::<20, 1000, 100, 2>(MessageQueueBroker::bounded(10))
-            .await;
+        parallel_check::<RecvMethodReceiver<_, _>, 1, 1000, 1, 1>(
+            MessageQueueBroker::bounded(10),
+        )
+        .await;
+        parallel_check::<RecvMethodReceiver<_, _>, 20, 1000, 100, 1>(
+            MessageQueueBroker::bounded(10),
+        )
+        .await;
+        parallel_check::<RecvMethodReceiver<_, _>, 20, 1000, 100, 2>(
+            MessageQueueBroker::bounded(10),
+        )
+        .await;
     }
 
     #[tokio::test]
+    async fn unbounded_parallel_stream() {
+        parallel_check::<StreamReceiver<_, _>, 1, 1000, 1, 1>(
+            MessageQueueBroker::unbounded(),
+        )
+        .await;
+        parallel_check::<StreamReceiver<_, _>, 20, 1000, 100, 1>(
+            MessageQueueBroker::unbounded(),
+        )
+        .await;
+        parallel_check::<StreamReceiver<_, _>, 20, 1000, 100, 2>(
+            MessageQueueBroker::unbounded(),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn bounded_parallel_stream() {
+        parallel_check::<StreamReceiver<_, _>, 1, 1000, 1, 1>(
+            MessageQueueBroker::bounded(10),
+        )
+        .await;
+        parallel_check::<StreamReceiver<_, _>, 20, 1000, 100, 1>(
+            MessageQueueBroker::bounded(10),
+        )
+        .await;
+        parallel_check::<StreamReceiver<_, _>, 20, 1000, 100, 2>(
+            MessageQueueBroker::bounded(10),
+        )
+        .await;
+    }
+
+    #[futures_test::test]
     async fn unbounded() {
         let mbq = MessageQueueBroker::unbounded();
 
@@ -1042,7 +1195,7 @@ mod tests {
         assert!(mbq.is_empty());
     }
 
-    #[tokio::test]
+    #[futures_test::test]
     async fn bounded() {
         let mqb = MessageQueueBroker::bounded(2);
 
@@ -1069,7 +1222,60 @@ mod tests {
         assert!(mqb.is_empty());
     }
 
-    #[tokio::test]
+    #[futures_test::test]
+    async fn unbounded_stream() {
+        let mbq = MessageQueueBroker::unbounded();
+
+        let mut sub1 = mbq.subscribe(1);
+        let mut sub2 = mbq.subscribe(2);
+
+        mbq.send(&1, 1).await.unwrap();
+        mbq.send(&2, 2).await.unwrap();
+        assert_eq!(mbq.len(), 2);
+        assert_eq!(mbq.try_send(&3, 42).unwrap_err(), TrySendError::Closed(42));
+        assert_eq!(mbq.len(), 2);
+
+        assert_eq!(sub1.len(), 1);
+        assert_eq!(sub1.next().await, Some(1));
+        assert_eq!(sub1.len(), 0);
+        assert_eq!(mbq.len(), 1);
+
+        assert_eq!(sub2.len(), 1);
+        assert_eq!(sub2.next().await, Some(2));
+        assert_eq!(sub2.len(), 0);
+        assert_eq!(mbq.len(), 0);
+
+        assert!(mbq.is_empty());
+    }
+
+    #[futures_test::test]
+    async fn bounded_stream() {
+        let mqb = MessageQueueBroker::bounded(2);
+
+        let mut sub1 = mqb.subscribe(1);
+        let mut sub2 = mqb.subscribe(2);
+
+        mqb.send(&1, 1).await.unwrap();
+        mqb.send(&2, 2).await.unwrap();
+        assert_eq!(mqb.len(), 2);
+        assert_eq!(mqb.try_send(&3, 42).unwrap_err(), TrySendError::Closed(42));
+        assert_eq!(mqb.try_send(&2, 3).unwrap_err(), TrySendError::Full(3));
+        assert_eq!(mqb.len(), 2);
+
+        assert_eq!(sub1.len(), 1);
+        assert_eq!(sub1.next().await, Some(1));
+        assert_eq!(sub1.len(), 0);
+        assert_eq!(mqb.len(), 1);
+
+        assert_eq!(sub2.len(), 1);
+        assert_eq!(sub2.next().await, Some(2));
+        assert_eq!(sub2.len(), 0);
+        assert_eq!(mqb.len(), 0);
+
+        assert!(mqb.is_empty());
+    }
+
+    #[futures_test::test]
     async fn sub_unsub() {
         let mqb = MessageQueueBroker::unbounded();
 
@@ -1090,7 +1296,7 @@ mod tests {
         assert_eq!(mqb.send(&1, 1).await.unwrap_err(), SendError(1));
     }
 
-    #[tokio::test]
+    #[futures_test::test]
     async fn close() {
         let mqb = MessageQueueBroker::<i32, i32>::unbounded();
         let sub1 = mqb.subscribe(1);
