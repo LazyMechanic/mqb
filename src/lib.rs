@@ -72,6 +72,7 @@ use std::{
     fmt::{Debug, Formatter},
     future::Future,
     hash::Hash,
+    marker::PhantomPinned,
     pin::Pin,
     sync::{
         Arc,
@@ -320,6 +321,7 @@ where
                     bucket,
                     broker: Arc::clone(this),
                     listener: None,
+                    _pin: Default::default(),
                 }
             }
             Entry::Vacant(e) => {
@@ -335,6 +337,7 @@ where
                     bucket,
                     broker: Arc::clone(this),
                     listener: None,
+                    _pin: Default::default(),
                 }
             }
         }
@@ -595,6 +598,10 @@ pub struct Subscriber<T: Hash + Eq, M> {
     bucket: Arc<Bucket<M>>,
     broker: Arc<MessageQueueBrokerInner<T, M>>,
     listener: Option<EventListener>,
+
+    // Keeping this type `!Unpin` enables future optimizations.
+    #[pin]
+    _pin: PhantomPinned,
 }
 
 impl<T, M> Subscriber<T, M>
@@ -800,6 +807,7 @@ where
             bucket: self.bucket.clone(),
             broker: self.broker.clone(),
             listener: None,
+            _pin: Default::default(),
         }
     }
 }
