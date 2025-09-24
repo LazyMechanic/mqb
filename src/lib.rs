@@ -271,6 +271,17 @@ where
     }
 }
 
+impl<T, M> Clone for MessageQueueBroker<T, M>
+where
+    T: Hash + Eq,
+{
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl<T, M> Drop for MessageQueueBroker<T, M>
 where
     T: Hash + Eq,
