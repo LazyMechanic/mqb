@@ -751,6 +751,11 @@ where
         }
     }
 
+    /// Returns the associated tag.
+    pub fn tag(&self) -> &T {
+        &self.tag
+    }
+
     fn try_recv2(
         broker: &MessageQueueBrokerInner<T, M>,
         bucket_queue: &SegQueue<M>,
