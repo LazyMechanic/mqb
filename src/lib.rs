@@ -82,6 +82,7 @@ use std::{
 };
 
 use crossbeam::queue::SegQueue;
+use equivalent::Equivalent;
 use event_listener::{Event, EventListener, IntoNotification};
 use event_listener_strategy::{EventListenerFuture, FutureWrapper, Strategy};
 use futures::Stream;
@@ -206,7 +207,7 @@ where
     /// ```
     pub fn try_send<Q>(&self, tag: &Q, msg: M) -> Result<(), TrySendError<M>>
     where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
+        Q: Hash + Equivalent<T> + ?Sized,
     {
         self.inner.try_send(tag, msg)
     }
@@ -271,7 +272,7 @@ where
     /// ```
     pub fn send<'a, Q>(&'a self, tag: &'a Q, msg: M) -> Send<'a, T, M, Q>
     where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
+        Q: Hash + Equivalent<T> + ?Sized,
     {
         Send::new(SendInner {
             broker: self,
@@ -337,7 +338,7 @@ where
         msg: M,
     ) -> Result<(), SendError<M>>
     where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
+        Q: Hash + Equivalent<T> + ?Sized,
     {
         self.send(tag, msg).wait()
     }
@@ -445,7 +446,7 @@ where
 
     fn try_send<Q>(&self, tag: &Q, msg: M) -> Result<(), TrySendError<M>>
     where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
+        Q: Hash + Equivalent<T> + ?Sized,
     {
         match self {
             MessageQueueBrokerInner::Bounded(b) => b.try_send(tag, msg),
@@ -455,7 +456,7 @@ where
 
     fn unsubscribe<Q>(&self, tag: &Q)
     where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
+        Q: Hash + Equivalent<T> + ?Sized,
     {
         match self {
             MessageQueueBrokerInner::Bounded(b) => b.unsubscribe(tag),
@@ -499,7 +500,7 @@ where
 
     fn try_send<Q>(&self, tag: &Q, msg: M) -> Result<(), TrySendError<M>>
     where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
+        Q: Hash + Equivalent<T> + ?Sized,
     {
         if self.is_closed() {
             return Err(TrySendError::Closed(msg));
@@ -530,7 +531,7 @@ where
 
     fn unsubscribe<Q>(&self, tag: &Q)
     where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
+        Q: Hash + Equivalent<T> + ?Sized,
     {
         let Some((_tag, bucket)) = self.buckets.remove_sync(tag) else {
             return;
@@ -572,7 +573,7 @@ where
 
     fn try_send<Q>(&self, tag: &Q, msg: M) -> Result<(), TrySendError<M>>
     where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
+        Q: Hash + Equivalent<T> + ?Sized,
     {
         if self.is_closed() {
             return Err(TrySendError::Closed(msg));
@@ -590,7 +591,7 @@ where
 
     fn unsubscribe<Q>(&self, tag: &Q)
     where
-        Q: Hash + scc::Equivalent<T> + ?Sized,
+        Q: Hash + Equivalent<T> + ?Sized,
     {
         let Some((_tag, bucket)) = self.buckets.remove_sync(tag) else {
             return;
@@ -1032,7 +1033,7 @@ pub struct Send<'a, T: Hash + Eq, M, Q: ?Sized> {
 impl<'a, T, M, Q> Send<'a, T, M, Q>
 where
     T: Hash + Eq,
-    Q: Hash + scc::Equivalent<T> + ?Sized,
+    Q: Hash + Equivalent<T> + ?Sized,
 {
     #[inline]
     fn new(inner: SendInner<'a, T, M, Q>) -> Self {
@@ -1050,7 +1051,7 @@ where
 impl<T, M, Q> Future for Send<'_, T, M, Q>
 where
     T: Hash + Eq,
-    Q: Hash + scc::Equivalent<T> + ?Sized,
+    Q: Hash + Equivalent<T> + ?Sized,
 {
     type Output = Result<(), SendError<M>>;
 
@@ -1081,7 +1082,7 @@ pub struct SendInner<'a, T: Hash + Eq, M, Q: ?Sized> {
 impl<T, M, Q> EventListenerFuture for SendInner<'_, T, M, Q>
 where
     T: Hash + Eq,
-    Q: Hash + scc::Equivalent<T> + ?Sized,
+    Q: Hash + Equivalent<T> + ?Sized,
 {
     type Output = Result<(), SendError<M>>;
 
