@@ -1293,7 +1293,7 @@ mod tests {
         }
     }
 
-    async fn parallel_check<
+    async fn parallel_check_async<
         R,
         const WRITER_THREADS: usize,
         const TAGS: usize,
@@ -1386,17 +1386,92 @@ mod tests {
         );
     }
 
+    fn parallel_check_blocking<
+        const WRITER_THREADS: usize,
+        const TAGS: usize,
+        const MESSAGES_PER_TAG: usize,
+        const READERS_PER_TAG: usize,
+    >(
+        mqb: MessageQueueBroker<usize, usize>,
+    ) {
+        let mut gen = rand::rng();
+
+        let mqb = Arc::new(mqb);
+
+        let mut tasks = easy_parallel::Parallel::new();
+        // writers
+        for thread_idx in 0..WRITER_THREADS {
+            let mqb = mqb.clone();
+            let messages = {
+                let mut msgs = Vec::with_capacity(
+                    MESSAGES_PER_TAG
+                        * usize::max(1, TAGS.div_ceil(WRITER_THREADS)),
+                );
+                for tag in
+                    (0..TAGS).filter(|tag| tag % WRITER_THREADS == thread_idx)
+                {
+                    for msg in 0..MESSAGES_PER_TAG {
+                        msgs.push((tag, msg));
+                    }
+                }
+                msgs.shuffle(&mut gen);
+                msgs
+            };
+            let f = move || {
+                for (tag, msg) in messages {
+                    mqb.send_blocking(&tag, msg).unwrap();
+                }
+            };
+
+            tasks = tasks.add(f);
+        }
+
+        // readers
+
+        let messages_per_readers = {
+            let single = MESSAGES_PER_TAG / READERS_PER_TAG;
+            let mut remainder = MESSAGES_PER_TAG % READERS_PER_TAG;
+            std::iter::from_fn(|| Some(single))
+                .take(READERS_PER_TAG)
+                .map(|v| {
+                    if remainder > 0 {
+                        remainder -= 1;
+                        v + 1
+                    } else {
+                        v
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for tag in 0..TAGS {
+            for thread_idx in 0..READERS_PER_TAG {
+                let sub = mqb.subscribe(tag);
+                let messages_per_reader = messages_per_readers[thread_idx];
+                let fut = move || {
+                    for _ in 0..messages_per_reader {
+                        sub.recv_blocking().unwrap();
+                    }
+                };
+
+                tasks = tasks.add(fut);
+            }
+        }
+
+        let _ = tasks.run();
+    }
+
     #[tokio::test]
     async fn unbounded_parallel() {
-        parallel_check::<RecvMethodReceiver<_, _>, 1, 1000, 1, 1>(
+        parallel_check_async::<RecvMethodReceiver<_, _>, 1, 1000, 1, 1>(
             MessageQueueBroker::unbounded(),
         )
         .await;
-        parallel_check::<RecvMethodReceiver<_, _>, 20, 1000, 100, 1>(
+        parallel_check_async::<RecvMethodReceiver<_, _>, 20, 1000, 100, 1>(
             MessageQueueBroker::unbounded(),
         )
         .await;
-        parallel_check::<RecvMethodReceiver<_, _>, 20, 1000, 100, 2>(
+        parallel_check_async::<RecvMethodReceiver<_, _>, 20, 1000, 100, 2>(
             MessageQueueBroker::unbounded(),
         )
         .await;
@@ -1404,15 +1479,15 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_parallel() {
-        parallel_check::<RecvMethodReceiver<_, _>, 1, 1000, 1, 1>(
+        parallel_check_async::<RecvMethodReceiver<_, _>, 1, 1000, 1, 1>(
             MessageQueueBroker::bounded(10),
         )
         .await;
-        parallel_check::<RecvMethodReceiver<_, _>, 20, 1000, 100, 1>(
+        parallel_check_async::<RecvMethodReceiver<_, _>, 20, 1000, 100, 1>(
             MessageQueueBroker::bounded(10),
         )
         .await;
-        parallel_check::<RecvMethodReceiver<_, _>, 20, 1000, 100, 2>(
+        parallel_check_async::<RecvMethodReceiver<_, _>, 20, 1000, 100, 2>(
             MessageQueueBroker::bounded(10),
         )
         .await;
@@ -1420,15 +1495,15 @@ mod tests {
 
     #[tokio::test]
     async fn unbounded_parallel_stream() {
-        parallel_check::<StreamReceiver<_, _>, 1, 1000, 1, 1>(
+        parallel_check_async::<StreamReceiver<_, _>, 1, 1000, 1, 1>(
             MessageQueueBroker::unbounded(),
         )
         .await;
-        parallel_check::<StreamReceiver<_, _>, 20, 1000, 100, 1>(
+        parallel_check_async::<StreamReceiver<_, _>, 20, 1000, 100, 1>(
             MessageQueueBroker::unbounded(),
         )
         .await;
-        parallel_check::<StreamReceiver<_, _>, 20, 1000, 100, 2>(
+        parallel_check_async::<StreamReceiver<_, _>, 20, 1000, 100, 2>(
             MessageQueueBroker::unbounded(),
         )
         .await;
@@ -1436,18 +1511,44 @@ mod tests {
 
     #[tokio::test]
     async fn bounded_parallel_stream() {
-        parallel_check::<StreamReceiver<_, _>, 1, 1000, 1, 1>(
+        parallel_check_async::<StreamReceiver<_, _>, 1, 1000, 1, 1>(
             MessageQueueBroker::bounded(10),
         )
         .await;
-        parallel_check::<StreamReceiver<_, _>, 20, 1000, 100, 1>(
+        parallel_check_async::<StreamReceiver<_, _>, 20, 1000, 100, 1>(
             MessageQueueBroker::bounded(10),
         )
         .await;
-        parallel_check::<StreamReceiver<_, _>, 20, 1000, 100, 2>(
+        parallel_check_async::<StreamReceiver<_, _>, 20, 1000, 100, 2>(
             MessageQueueBroker::bounded(10),
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn unbounded_parallel_blocking() {
+        parallel_check_blocking::<1, 1000, 1, 1>(
+            MessageQueueBroker::unbounded(),
+        );
+        parallel_check_blocking::<20, 1000, 100, 1>(
+            MessageQueueBroker::unbounded(),
+        );
+        parallel_check_blocking::<20, 1000, 100, 2>(
+            MessageQueueBroker::unbounded(),
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_parallel_blocking() {
+        parallel_check_blocking::<1, 1000, 1, 1>(MessageQueueBroker::bounded(
+            10,
+        ));
+        parallel_check_blocking::<20, 1000, 100, 1>(
+            MessageQueueBroker::bounded(10),
+        );
+        parallel_check_blocking::<20, 1000, 100, 2>(
+            MessageQueueBroker::bounded(10),
+        );
     }
 
     #[futures_test::test]
