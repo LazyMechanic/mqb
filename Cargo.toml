@@ -18,7 +18,7 @@ event-listener = "5.4"
 event-listener-strategy = "0.5"
 futures = "0.3"
 pin-project = "1.1"
-scc = { version = "2.3", features = ["equivalent"] }
+scc = { version = "3.1", features = ["equivalent"] }
 thiserror = "2.0"
 
 [dev-dependencies]

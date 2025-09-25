@@ -379,7 +379,7 @@ where
             MessageQueueBrokerInner::Unbounded(b) => &b.buckets,
         };
 
-        match buckets.entry(tag.clone()) {
+        match buckets.entry_sync(tag.clone()) {
             Entry::Occupied(e) => {
                 let bucket = e.get().clone();
                 bucket.subs.fetch_add(1, Ordering::Release);
@@ -479,11 +479,10 @@ where
 {
     fn close(&self) {
         self.is_closed.store(true, Ordering::Release);
-        let mut next_entry = self.buckets.first_entry();
-        while let Some(e) = next_entry {
-            e.recv_notify.notify(usize::MAX.additional());
-            next_entry = e.next();
-        }
+        self.buckets.iter_sync(|_, v| {
+            v.recv_notify.notify(usize::MAX.additional());
+            true
+        });
     }
 
     fn is_closed(&self) -> bool {
@@ -506,7 +505,7 @@ where
             return Err(TrySendError::Closed(msg));
         }
 
-        let Some(bucket) = self.buckets.get(tag) else {
+        let Some(bucket) = self.buckets.get_sync(tag) else {
             return Err(TrySendError::Closed(msg));
         };
 
@@ -533,7 +532,7 @@ where
     where
         Q: Hash + scc::Equivalent<T> + ?Sized,
     {
-        let Some((_tag, bucket)) = self.buckets.remove(tag) else {
+        let Some((_tag, bucket)) = self.buckets.remove_sync(tag) else {
             return;
         };
         self.len.fetch_sub(bucket.queue.len(), Ordering::Release);
@@ -553,11 +552,10 @@ where
 {
     fn close(&self) {
         self.is_closed.store(true, Ordering::Release);
-        let mut next_entry = self.buckets.first_entry();
-        while let Some(e) = next_entry {
-            e.recv_notify.notify(usize::MAX.additional());
-            next_entry = e.next();
-        }
+        self.buckets.iter_sync(|_, v| {
+            v.recv_notify.notify(usize::MAX.additional());
+            true
+        });
     }
 
     fn is_closed(&self) -> bool {
@@ -580,7 +578,7 @@ where
             return Err(TrySendError::Closed(msg));
         }
 
-        let Some(bucket) = self.buckets.get(tag) else {
+        let Some(bucket) = self.buckets.get_sync(tag) else {
             return Err(TrySendError::Closed(msg));
         };
 
@@ -594,7 +592,7 @@ where
     where
         Q: Hash + scc::Equivalent<T> + ?Sized,
     {
-        let Some((_tag, bucket)) = self.buckets.remove(tag) else {
+        let Some((_tag, bucket)) = self.buckets.remove_sync(tag) else {
             return;
         };
         self.len.fetch_sub(bucket.queue.len(), Ordering::Release);
