@@ -283,7 +283,7 @@ where
         })
     }
 
-    /// Sends a message with the tag.
+    /// Sends a message with the tag using the blocking strategy.
     ///
     /// If broker is closed, or there are no any subscriber to provided tag then returns `TrySendError::Closed(_)`.
     /// If the tagged queue is full, it will wait until a slot becomes available.
