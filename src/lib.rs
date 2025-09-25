@@ -965,8 +965,6 @@ where
 #[derive(Debug)]
 pub struct RecvInner<'a, T: Hash + Eq, M> {
     sub: &'a Subscriber<T, M>,
-
-    // Listener waiting on the channel.
     listener: Option<EventListener>,
 
     // Keeping this type `!Unpin` enables future optimizations.
@@ -1057,8 +1055,6 @@ pub struct SendInner<'a, T: Hash + Eq, M, Q: ?Sized> {
     broker: &'a MessageQueueBroker<T, M>,
     msg: Option<M>,
     tag: Option<&'a Q>,
-
-    // Listener waiting on the channel.
     listener: Option<EventListener>,
 
     // Keeping this type `!Unpin` enables future optimizations.
