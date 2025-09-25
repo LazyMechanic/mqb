@@ -1218,6 +1218,7 @@ mod tests {
 
     use futures::StreamExt;
     use rand::prelude::SliceRandom;
+    use static_assertions::{assert_impl_all, assert_not_impl_any};
     use tokio::sync::Semaphore;
 
     use super::*;
@@ -1725,5 +1726,19 @@ mod tests {
         assert!(!sub1.is_closed());
         drop(mqb);
         assert!(sub1.is_closed());
+    }
+
+    #[test]
+    fn check_bounds() {
+        assert_impl_all!(MessageQueueBroker<i32, i32>: std::marker::Send, Sync);
+
+        assert_impl_all!(Subscriber<i32, i32>: std::marker::Send, Sync);
+        assert_not_impl_any!(Subscriber<i32, i32>: Unpin);
+
+        assert_impl_all!(Send<'_, i32, i32, i32>: std::marker::Send, Sync);
+        assert_not_impl_any!(Send<'_, i32, i32, i32>: Unpin);
+
+        assert_impl_all!(Recv<'_, i32, i32>: std::marker::Send, Sync);
+        assert_not_impl_any!(Recv<'_, i32, i32>: Unpin);
     }
 }
