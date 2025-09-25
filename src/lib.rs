@@ -717,27 +717,7 @@ where
     /// assert_eq!(sub.try_recv().unwrap_err(), TryRecvError::Empty);
     /// ```
     pub fn try_recv(&self) -> Result<M, TryRecvError> {
-        match &*self.broker {
-            MessageQueueBrokerInner::Bounded(b) => {
-                if b.is_closed() {
-                    return Err(TryRecvError::Closed);
-                }
-
-                let msg = self.bucket.queue.pop().ok_or(TryRecvError::Empty)?;
-                b.len.fetch_sub(1, Ordering::Release);
-                b.send_notify.notify(1.additional());
-                Ok(msg)
-            }
-            MessageQueueBrokerInner::Unbounded(b) => {
-                if b.is_closed() {
-                    return Err(TryRecvError::Closed);
-                }
-
-                let msg = self.bucket.queue.pop().ok_or(TryRecvError::Empty)?;
-                b.len.fetch_sub(1, Ordering::Release);
-                Ok(msg)
-            }
-        }
+        Self::try_recv2(&self.broker, &self.bucket)
     }
 
     /// Receives a message from the tagged queue.
@@ -851,6 +831,33 @@ where
     pub fn tag(&self) -> &T {
         &self.tag
     }
+
+    fn try_recv2(
+        broker: &MessageQueueBrokerInner<T, M>,
+        bucket: &Bucket<M>,
+    ) -> Result<M, TryRecvError> {
+        match broker {
+            MessageQueueBrokerInner::Bounded(b) => {
+                if b.is_closed() {
+                    return Err(TryRecvError::Closed);
+                }
+
+                let msg = bucket.queue.pop().ok_or(TryRecvError::Empty)?;
+                b.len.fetch_sub(1, Ordering::Release);
+                b.send_notify.notify(1.additional());
+                Ok(msg)
+            }
+            MessageQueueBrokerInner::Unbounded(b) => {
+                if b.is_closed() {
+                    return Err(TryRecvError::Closed);
+                }
+
+                let msg = bucket.queue.pop().ok_or(TryRecvError::Empty)?;
+                b.len.fetch_sub(1, Ordering::Release);
+                Ok(msg)
+            }
+        }
+    }
 }
 
 impl<T, M> Clone for Subscriber<T, M>
@@ -890,45 +897,25 @@ where
     type Item = M;
 
     fn poll_next(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+
         loop {
-            // If this stream is listening for events, first wait for a notification.
-            {
-                let this = self.as_mut().project();
-                if let Some(listener) = this.listener.as_mut() {
-                    ready!(Pin::new(listener).poll(cx));
-                    *this.listener = None;
-                }
+            // Attempt to receive a message.
+            match Self::try_recv2(this.broker, this.bucket) {
+                Ok(msg) => return Poll::Ready(Some(msg)),
+                Err(TryRecvError::Closed) => return Poll::Ready(None),
+                Err(TryRecvError::Empty) => {}
             }
 
-            'internal: loop {
-                // Attempt to receive a message.
-                match self.try_recv() {
-                    Ok(msg) => {
-                        // The stream is not blocked on an event - drop the listener.
-                        let this = self.as_mut().project();
-                        *this.listener = None;
-                        return Poll::Ready(Some(msg));
-                    }
-                    Err(TryRecvError::Closed) => {
-                        // The stream is not blocked on an event - drop the listener.
-                        let this = self.as_mut().project();
-                        *this.listener = None;
-                        return Poll::Ready(None);
-                    }
-                    Err(TryRecvError::Empty) => {}
-                }
-
-                // Receiving failed - now start listening for notifications or wait for one.
-                let this = self.as_mut().project();
-                if this.listener.is_some() {
-                    // Go back to the outer loop to wait for a notification.
-                    break 'internal;
-                } else {
-                    *this.listener = Some(this.bucket.recv_notify.listen());
-                }
+            // Receiving failed - now start listening for notifications or wait for one.
+            if let Some(listener) = this.listener.as_mut() {
+                ready!(Pin::new(listener).poll(cx));
+                *this.listener = None;
+            } else {
+                *this.listener = Some(this.bucket.recv_notify.listen());
             }
         }
     }
