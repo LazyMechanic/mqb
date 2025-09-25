@@ -9,8 +9,8 @@ documentation = "https://docs.rs/mqb"
 keywords = ["queue", "mpmc", "broker", "channel", "chan"]
 categories = ["asynchronous", "concurrency"]
 include = ["src/**/*.rs", "README.md", "LICENSE"]
-edition = "2021"
-rust-version = "1.74"
+edition = "2024"
+rust-version = "1.85.0"
 
 [dependencies]
 crossbeam = "0.8"

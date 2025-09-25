@@ -1305,7 +1305,7 @@ mod tests {
     {
         let all_threads = WRITER_THREADS + TAGS * READERS_PER_TAG;
 
-        let mut gen = rand::rng();
+        let mut rnd = rand::rng();
 
         let mqb = Arc::new(mqb);
         let start_notify = Arc::new(Semaphore::new(0));
@@ -1327,7 +1327,7 @@ mod tests {
                         msgs.push((tag, msg));
                     }
                 }
-                msgs.shuffle(&mut gen);
+                msgs.shuffle(&mut rnd);
                 msgs
             };
             let fut = async move {
@@ -1393,7 +1393,7 @@ mod tests {
     >(
         mqb: MessageQueueBroker<usize, usize>,
     ) {
-        let mut gen = rand::rng();
+        let mut rnd = rand::rng();
 
         let mqb = Arc::new(mqb);
 
@@ -1413,7 +1413,7 @@ mod tests {
                         msgs.push((tag, msg));
                     }
                 }
-                msgs.shuffle(&mut gen);
+                msgs.shuffle(&mut rnd);
                 msgs
             };
             let f = move || {

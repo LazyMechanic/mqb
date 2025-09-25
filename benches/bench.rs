@@ -203,7 +203,7 @@ where
 {
     let all_threads = WRITER_THREADS + TAGS * READERS_PER_TAG;
 
-    let mut gen = rand::rng();
+    let mut rnd = rand::rng();
 
     let mut duration = Duration::ZERO;
     for _ in 0..iters {
@@ -227,7 +227,7 @@ where
                         msgs.push((tag, msg));
                     }
                 }
-                msgs.shuffle(&mut gen);
+                msgs.shuffle(&mut rnd);
                 msgs
             };
             let fut = async move {
