@@ -1,6 +1,6 @@
 [package]
 name = "mqb"
-version = "0.2.0"
+version = "0.3.0"
 description = "Lock free in memory message queue broker"
 authors = ["LazyMechanic <asharnrus@gmail.com>"]
 license = "MIT OR Apache-2.0"
@@ -28,6 +28,7 @@ easy-parallel = "3.3.1"
 futures-test = "0.3.31"
 num_cpus = "1.16.0"
 rand = "0.9.0"
+static_assertions = "1.1.0"
 tokio = { version = "1.39.2", features = ["full"] }
 
 [[bench]]
