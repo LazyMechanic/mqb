@@ -161,8 +161,8 @@ where
 
     /// Trying to send a message with the tag.
     ///
-    /// If broker is closed, or there are no any subscriber to provided tag then returns `TrySendError::Closed(_)`.
-    /// If the tagged queue is full then returns `TrySendError::Full(_)`.
+    /// If broker is closed, or there are no any subscriber to provided tag then returns [`TrySendError::Closed(_)`].
+    /// If the tagged queue is full then returns [`TrySendError::Full(_)`].
     ///
     /// ### Ok
     /// ```
@@ -205,6 +205,9 @@ where
     /// assert!(mqb.try_send(&1, 1).is_ok());
     /// assert_eq!(mqb.try_send(&1, 1).unwrap_err(), TrySendError::Full(1));
     /// ```
+    ///
+    /// [`TrySendError::Closed(_)`]: crate::TrySendError::Closed
+    /// [`TrySendError::Full(_)`]: crate::TrySendError::Full
     pub fn try_send<Q>(&self, tag: &Q, msg: M) -> Result<(), TrySendError<M>>
     where
         Q: Hash + Equivalent<T> + ?Sized,
@@ -214,7 +217,7 @@ where
 
     /// Sends a message with the tag.
     ///
-    /// If broker is closed, or there are no any subscriber to provided tag then returns `TrySendError::Closed(_)`.
+    /// If broker is closed, or there are no any subscriber to provided tag then returns [`SendError`].
     /// If the tagged queue is full, it will wait until a slot becomes available.
     ///
     /// ### Ok
@@ -285,7 +288,7 @@ where
 
     /// Sends a message with the tag using the blocking strategy.
     ///
-    /// If broker is closed, or there are no any subscriber to provided tag then returns `TrySendError::Closed(_)`.
+    /// If broker is closed, or there are no any subscriber to provided tag then returns [`SendError`].
     /// If the tagged queue is full, it will wait until a slot becomes available.
     ///
     /// ### Ok
@@ -607,9 +610,7 @@ struct Bucket<M> {
     recv_notify: Event,
 }
 
-/// Subscriber to the tagged queue created by [`subscribe()`] function.
-///
-/// [`subscribe()`]: crate::MessageQueueBroker::subscribe
+/// Subscriber to the tagged queue created by [`MessageQueueBroker::subscribe()`] function.
 #[pin_project(PinnedDrop)]
 #[derive(Debug)]
 pub struct Subscriber<T: Hash + Eq, M> {
@@ -682,8 +683,8 @@ where
 
     /// Trying to receive a message from the tagged queue.
     ///
-    /// If broker is closed then returns `TryRecvError::Closed`.
-    /// If the tagged queue is empty returns `TryRecvError::Empty`.
+    /// If broker is closed then returns [`TryRecvError::Closed`].
+    /// If the tagged queue is empty returns [`TryRecvError::Empty`].
     ///
     /// ### Ok
     /// ```
@@ -722,7 +723,7 @@ where
 
     /// Receives a message from the tagged queue.
     ///
-    /// If broker is closed then returns `RecvError`.
+    /// If broker is closed then returns [`RecvError`].
     ///
     /// ### Ok
     /// ```
@@ -775,7 +776,7 @@ where
 
     /// Receives a message from the tagged queue using the blocking strategy.
     ///
-    /// If broker is closed then returns `RecvError`.
+    /// If broker is closed then returns [`RecvError`].
     ///
     /// ### Ok
     /// ```
@@ -1118,6 +1119,7 @@ where
     }
 }
 
+/// An error returned from [`MessageQueueBroker::send()`].
 #[derive(thiserror::Error, Eq, PartialEq)]
 #[error("sending into a closed channel")]
 pub struct SendError<T>(pub T);
@@ -1135,6 +1137,7 @@ impl<T> Debug for SendError<T> {
     }
 }
 
+/// An error returned from [`MessageQueueBroker::try_send()`].
 #[derive(thiserror::Error, Eq, PartialEq)]
 pub enum TrySendError<T> {
     #[error("sending into a full channel")]
@@ -1178,10 +1181,12 @@ impl<T> Debug for TrySendError<T> {
     }
 }
 
+/// An error returned from [`Subscriber::recv()`].
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 #[error("receiving from an empty and closed channel")]
 pub struct RecvError;
 
+/// An error returned from [`Subscriber::try_recv()`].
 #[derive(Debug, thiserror::Error, Eq, PartialEq)]
 pub enum TryRecvError {
     #[error("receiving from an empty channel")]
