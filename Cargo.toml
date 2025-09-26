@@ -1,6 +1,6 @@
 [package]
 name = "mqb"
-version = "0.3.0"
+version = "0.3.1"
 description = "Lock free in memory message queue broker"
 authors = ["LazyMechanic <asharnrus@gmail.com>"]
 license = "MIT OR Apache-2.0"
