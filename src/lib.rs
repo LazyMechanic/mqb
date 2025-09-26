@@ -963,7 +963,7 @@ where
 
 #[pin_project]
 #[derive(Debug)]
-pub struct RecvInner<'a, T: Hash + Eq, M> {
+struct RecvInner<'a, T: Hash + Eq, M> {
     sub: &'a Subscriber<T, M>,
     listener: Option<EventListener>,
 
@@ -1051,7 +1051,7 @@ where
 
 #[pin_project]
 #[derive(Debug)]
-pub struct SendInner<'a, T: Hash + Eq, M, Q: ?Sized> {
+struct SendInner<'a, T: Hash + Eq, M, Q: ?Sized> {
     broker: &'a MessageQueueBroker<T, M>,
     msg: Option<M>,
     tag: Option<&'a Q>,
