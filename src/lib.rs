@@ -144,9 +144,25 @@ where
         self.inner.close();
     }
 
+    /// Closes the queue by tag without affecting other queues.
+    pub fn close_for<Q>(&self, tag: &Q)
+    where
+        Q: Hash + Equivalent<T> + ?Sized,
+    {
+        self.inner.close_for(tag);
+    }
+
     /// Checks if the broker is closed.
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
+    }
+
+    /// Checks if the queue by tag is closed.
+    pub fn is_closed_for<Q>(&self, tag: &Q) -> bool
+    where
+        Q: Hash + Equivalent<T> + ?Sized,
+    {
+        self.inner.is_closed_for(tag)
     }
 
     /// Gets the global queue length.
@@ -400,6 +416,7 @@ where
                     queue: Default::default(),
                     subs: AtomicUsize::new(1),
                     recv_notify: Default::default(),
+                    is_closed: AtomicBool::new(false),
                 });
                 e.insert_entry(bucket.clone());
 
@@ -426,10 +443,30 @@ where
         }
     }
 
+    fn close_for<Q>(&self, tag: &Q)
+    where
+        Q: Hash + Equivalent<T> + ?Sized,
+    {
+        match self {
+            MessageQueueBrokerInner::Bounded(b) => b.close_for(tag),
+            MessageQueueBrokerInner::Unbounded(b) => b.close_for(tag),
+        }
+    }
+
     fn is_closed(&self) -> bool {
         match self {
             MessageQueueBrokerInner::Bounded(b) => b.is_closed(),
             MessageQueueBrokerInner::Unbounded(b) => b.is_closed(),
+        }
+    }
+
+    fn is_closed_for<Q>(&self, tag: &Q) -> bool
+    where
+        Q: Hash + Equivalent<T> + ?Sized,
+    {
+        match self {
+            MessageQueueBrokerInner::Bounded(b) => b.is_closed_for(tag),
+            MessageQueueBrokerInner::Unbounded(b) => b.is_closed_for(tag),
         }
     }
 
@@ -489,8 +526,30 @@ where
         });
     }
 
+    fn close_for<Q>(&self, tag: &Q)
+    where
+        Q: Hash + Equivalent<T> + ?Sized,
+    {
+        let Some(b) = self.buckets.get_sync(tag) else {
+            return;
+        };
+
+        b.is_closed.store(true, Ordering::Release);
+    }
+
     fn is_closed(&self) -> bool {
         self.is_closed.load(Ordering::Acquire)
+    }
+
+    fn is_closed_for<Q>(&self, tag: &Q) -> bool
+    where
+        Q: Hash + Equivalent<T> + ?Sized,
+    {
+        let Some(b) = self.buckets.get_sync(tag) else {
+            return true;
+        };
+
+        b.is_closed.load(Ordering::Acquire)
     }
 
     fn len(&self) -> usize {
@@ -562,8 +621,30 @@ where
         });
     }
 
+    fn close_for<Q>(&self, tag: &Q)
+    where
+        Q: Hash + Equivalent<T> + ?Sized,
+    {
+        let Some(b) = self.buckets.get_sync(tag) else {
+            return;
+        };
+
+        b.is_closed.store(true, Ordering::Release);
+    }
+
     fn is_closed(&self) -> bool {
         self.is_closed.load(Ordering::Acquire)
+    }
+
+    fn is_closed_for<Q>(&self, tag: &Q) -> bool
+    where
+        Q: Hash + Equivalent<T> + ?Sized,
+    {
+        let Some(b) = self.buckets.get_sync(tag) else {
+            return true;
+        };
+
+        b.is_closed.load(Ordering::Acquire)
     }
 
     fn len(&self) -> usize {
@@ -608,6 +689,13 @@ struct Bucket<M> {
     queue: SegQueue<M>,
     subs: AtomicUsize,
     recv_notify: Event,
+    is_closed: AtomicBool,
+}
+
+impl<M> Bucket<M> {
+    fn is_closed(&self) -> bool {
+        self.is_closed.load(Ordering::Acquire)
+    }
 }
 
 /// Subscriber to the tagged queue created by [`MessageQueueBroker::subscribe()`] function.
@@ -673,12 +761,9 @@ where
         self.len() == 0
     }
 
-    /// Checks if the broker is closed.
+    /// Checks if the broker or tagged queue is closed.
     pub fn is_closed(&self) -> bool {
-        match &*self.broker {
-            MessageQueueBrokerInner::Bounded(b) => b.is_closed(),
-            MessageQueueBrokerInner::Unbounded(b) => b.is_closed(),
-        }
+        self.broker.is_closed() || self.bucket.is_closed()
     }
 
     /// Trying to receive a message from the tagged queue.
@@ -1723,10 +1808,30 @@ mod tests {
     async fn close() {
         let mqb = MessageQueueBroker::<i32, i32>::unbounded();
         let sub1 = mqb.subscribe(1);
+        let sub2 = mqb.subscribe(2);
 
         assert!(!sub1.is_closed());
+        assert!(!sub2.is_closed());
         drop(mqb);
         assert!(sub1.is_closed());
+        assert!(sub2.is_closed());
+    }
+
+    #[futures_test::test]
+    async fn close_for() {
+        let mqb = MessageQueueBroker::<i32, i32>::unbounded();
+        let sub1 = mqb.subscribe(1);
+        let sub2 = mqb.subscribe(2);
+
+        assert!(!sub1.is_closed());
+        assert!(!sub2.is_closed());
+        mqb.close_for(&1);
+        assert!(sub1.is_closed());
+        assert!(!sub2.is_closed());
+
+        assert!(mqb.is_closed_for(&1));
+        assert!(!mqb.is_closed_for(&2));
+        assert!(mqb.is_closed_for(&42));
     }
 
     #[test]
